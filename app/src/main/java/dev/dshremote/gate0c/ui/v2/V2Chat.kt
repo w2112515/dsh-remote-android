@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -33,14 +34,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,7 +59,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.platform.testTag
@@ -68,6 +70,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -1508,30 +1511,43 @@ private fun V2Composer(
         state.sessionBudget?.exhausted == true -> "会话预算已用尽 · 在会话策略中提高上限后才能继续发送"
         else -> "控制 epoch ${state.controlLease.epoch} · 发送先于传输在本地持久化"
     }
+    val happySend = pending == null && !stale && writeAuthorized && leaseUsable &&
+        state.sessionBudget?.exhausted != true && !state.commandRecoveryBlocked
+    val draftPlaceholder = when {
+        voice != null && listening -> "正在聆听…"
+        stale -> "离线 · 可留草稿，恢复后由你手动发送"
+        !writeAuthorized -> "只读 · 未获得该会话的控制授权"
+        pending != null -> "命令结算中，输入已锁定"
+        voice != null -> "发指令，或点麦克风说话…"
+        else -> "发指令…"
+    }
 
-    Surface(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
+            .background(v2.bg2)
             .testTag("command-settlement")
             .semantics {
                 testTagsAsResourceId = true
                 stateDescription = settlement
             },
-        color = v2.bg2,
-        border = BorderStroke(1.dp, v2.line),
     ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(v2.line),
+        )
         Column(
             modifier = Modifier
                 .navigationBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // 原型 P7 C8：活动 turn 行只留事实文案；停止动作移到 composer 右侧红色圆钮。
-            if (stopAuthorized && state.sessionRunning == true && !stale) {
-                val stopPending = pending?.operation == PendingCommandOperation.STOP
+            val stopPending = pending?.operation == PendingCommandOperation.STOP
+            if (stopAuthorized && stopPending && !stale) {
                 Text(
-                    if (stopPending) "正在停止 turn ${pending.expectedActivityRevision}" else
-                        "活动 turn ${state.activityRevision ?: "待定"}",
+                    "正在停止 turn ${pending.expectedActivityRevision}",
                     modifier = Modifier.fillMaxWidth(),
                     color = v2.tx2,
                     fontSize = 11.sp,
@@ -1685,32 +1701,32 @@ private fun V2Composer(
                         onAttachImage = onAttachImage,
                     )
                 }
-                OutlinedTextField(
-                    value = state.localDraft,
-                    onValueChange = onDraftChanged,
-                    enabled = pending?.operation != PendingCommandOperation.SEND_INPUT,
-                    modifier = Modifier.weight(1f),
-                    minLines = 1,
-                    maxLines = 4,
-                    placeholder = {
-                        Text(
-                            when {
-                                voice != null && listening -> "正在聆听…"
-                                stale -> "离线 · 可留草稿，恢复后由你手动发送"
-                                !writeAuthorized -> "只读 · 未获得该会话的控制授权"
-                                pending != null -> "命令结算中，输入已锁定"
-                                voice != null -> "发指令，或点麦克风说话…"
-                                else -> "发指令…"
-                            },
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 40.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(v2.card)
+                        .border(1.dp, v2.line, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    if (state.localDraft.isEmpty()) {
+                        Text(draftPlaceholder, color = v2.tx3, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
+                    BasicTextField(
+                        value = state.localDraft,
+                        onValueChange = onDraftChanged,
+                        enabled = pending?.operation != PendingCommandOperation.SEND_INPUT,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = TextStyle(
+                            color = v2.tx,
                             fontSize = 13.sp,
-                        )
-                    },
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = v2.blue,
-                        unfocusedBorderColor = v2.line,
-                    ),
-                )
+                            lineHeight = 18.sp,
+                        ),
+                        cursorBrush = SolidColor(v2.blue),
+                        maxLines = 4,
+                    )
+                }
                 if (voice != null) {
                     val context = androidx.compose.ui.platform.LocalContext.current
                     val permissionLauncher = rememberLauncherForActivityResult(
@@ -1764,14 +1780,37 @@ private fun V2Composer(
                         )
                     }
                 }
-                Button(
-                    onClick = action,
-                    enabled = actionEnabled,
-                    modifier = Modifier.testTag("command-action"),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = v2.blue),
-                ) {
-                    Text(actionLabel, fontSize = 13.sp)
+                if (actionLabel == "发送") {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(if (actionEnabled) v2.blue else v2.card)
+                            .clickable(enabled = actionEnabled, role = Role.Button, onClick = action)
+                            .testTag("command-action"),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Canvas(Modifier.size(16.dp)) {
+                            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                            val arrow = if (actionEnabled) v2.bg else v2.tx3
+                            drawLine(arrow, Offset(size.width / 2f, size.height * 0.78f), Offset(size.width / 2f, size.height * 0.22f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+                            drawLine(arrow, Offset(size.width / 2f, size.height * 0.22f), Offset(size.width * 0.28f, size.height * 0.48f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+                            drawLine(arrow, Offset(size.width / 2f, size.height * 0.22f), Offset(size.width * 0.72f, size.height * 0.48f), strokeWidth = stroke.width, cap = StrokeCap.Round)
+                        }
+                    }
+                } else {
+                    Text(
+                        actionLabel,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (actionEnabled) v2.blue else v2.card)
+                            .clickable(enabled = actionEnabled, role = Role.Button, onClick = action)
+                            .padding(horizontal = 10.dp, vertical = 10.dp)
+                            .testTag("command-action"),
+                        color = if (actionEnabled) v2.bg else v2.tx3,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
             // c-meta 行（原型第二行）：模型 chip 左置 + 模式 chip（STD MODE 位）
@@ -1787,12 +1826,14 @@ private fun V2Composer(
                 // S-mode-select：原型 STD MODE 位的真实实现（空白会话可切换，开始后锁定）。
                 V2AgentPresetChip(state = state, onSelectAgentPreset = onSelectAgentPreset)
             }
-            Text(
-                settlement,
-                color = if (pending?.progress == PendingCommandProgress.UNKNOWN) v2.amber else v2.tx3,
-                fontSize = 10.sp,
-                lineHeight = 14.sp,
-            )
+            if (!happySend) {
+                Text(
+                    settlement,
+                    color = if (pending?.progress == PendingCommandProgress.UNKNOWN) v2.amber else v2.tx3,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                )
+            }
             state.commandWarning?.let { warning ->
                 Text(warning, color = v2.amber, fontSize = 10.sp, lineHeight = 14.sp)
             }

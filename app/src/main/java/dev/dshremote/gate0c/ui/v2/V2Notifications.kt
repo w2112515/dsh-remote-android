@@ -16,8 +16,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
@@ -31,6 +36,7 @@ import androidx.compose.ui.unit.sp
 internal fun V2NotificationsPanel(
     notifications: List<V2Notification>,
     onOpen: (V2Notification) -> Unit,
+    onDismiss: (Long) -> Unit,
 ) {
     val v2 = LocalV2.current
     if (notifications.isEmpty()) {
@@ -47,25 +53,68 @@ internal fun V2NotificationsPanel(
         }
         return
     }
-    // 原型 P7 N2：扁平行 + 分隔线（去卡片化），方形图标徽章，红色未读点，
-    // mono 时间。计数与「全部已读」由 V2App 头部承载。
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(vertical = 2.dp),
     ) {
         items(notifications, key = V2Notification::id) { notification ->
-            val tint = when (notification.kind) {
-                V2NotificationKind.APPROVAL_ARRIVED -> v2.amber
-                V2NotificationKind.APPROVAL_SETTLED -> v2.green
-                V2NotificationKind.INPUT_WAITING -> v2.cyan
-                V2NotificationKind.CONNECTION_LOST -> v2.red
-                V2NotificationKind.REPAIR_REQUIRED -> v2.red
-                V2NotificationKind.ARTIFACT_REGISTERED -> v2.blue
+            V2NotificationRow(
+                notification = notification,
+                onOpen = { onOpen(notification) },
+                onDismiss = { onDismiss(notification.id) },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun V2NotificationRow(
+    notification: V2Notification,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val v2 = LocalV2.current
+    val tint = when (notification.kind) {
+        V2NotificationKind.APPROVAL_ARRIVED -> v2.amber
+        V2NotificationKind.APPROVAL_SETTLED -> v2.green
+        V2NotificationKind.INPUT_WAITING -> v2.cyan
+        V2NotificationKind.CONNECTION_LOST -> v2.red
+        V2NotificationKind.REPAIR_REQUIRED -> v2.red
+        V2NotificationKind.ARTIFACT_REGISTERED -> v2.blue
+    }
+    val dismissState = rememberSwipeToDismissBoxState()
+    LaunchedEffect(dismissState.currentValue) {
+        if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
+            onDismiss()
+        }
+    }
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        backgroundContent = {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(v2.red.copy(alpha = 0.14f))
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Text(
+                    "清除",
+                    color = v2.red,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
+        },
+    ) {
+        Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(role = Role.Button) { onOpen(notification) }
+                    .background(v2.bg)
+                    .clickable(role = Role.Button, onClick = onOpen)
                     .semantics(mergeDescendants = true) {}
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),

@@ -35,10 +35,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.dshremote.gate0c.transport.AgentPresetProjection
 import dev.dshremote.gate0c.transport.Gate0CState
 import dev.dshremote.gate0c.transport.SessionDirectoryEntry
-import dev.dshremote.gate0c.transport.agentPresetLabel
 import dev.dshremote.gate0c.transport.hasCapabilities
 import java.text.DateFormat
 import java.util.Date
@@ -48,6 +46,21 @@ internal fun createAuthorized(state: Gate0CState): Boolean =
     state.isReady() && !state.isStaleView() &&
         hasCapabilities(state.grantedCapabilities, 68uL) &&
         state.pendingCommand == null
+
+/** Why the header ＋ cannot create right now. Empty/authorized fleets still get a sentence. */
+internal fun createBlockedReason(states: List<Gate0CState>): String {
+    if (states.isEmpty()) return "还没有配对的主机。"
+    if (states.any(::createAuthorized)) return "选择一台主机后即可新建。"
+    val pending = states.any { it.pendingCommand != null }
+    val noneReady = states.none { it.isReady() && !it.isStaleView() }
+    val noneWrite = states.none { hasCapabilities(it.grantedCapabilities, 68uL) }
+    return when {
+        pending -> "有命令尚未结算。结算完成后再新建会话。"
+        noneReady -> "主机离线或尚未就绪。恢复连接后才能新建会话。"
+        noneWrite -> "当前配对是只读授权，不能新建会话。"
+        else -> "现在不能新建会话。"
+    }
+}
 
 @Composable
 internal fun V2SessionsPanel(
@@ -94,6 +107,7 @@ internal fun V2SessionsPanel(
 
         val allSessions = hosts.flatMap { face -> face.state.sessions.map { face to it } }
         if (allSessions.isEmpty()) {
+            val canCreate = hosts.any { createAuthorized(it.state) }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -103,7 +117,7 @@ internal fun V2SessionsPanel(
             ) {
                 Text("还没有会话", color = v2.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (onStartCreate != null) {
+                    if (canCreate) {
                         "新建一个空白会话，或在 Host 上的 DSH 里开始工作。"
                     } else {
                         "在 Host 上的 DSH 里开始工作后，会话会出现在这里。"
@@ -116,7 +130,7 @@ internal fun V2SessionsPanel(
                     Button(
                         onClick = onStartCreate,
                         modifier = Modifier.testTag("create-session-empty"),
-                    ) { Text("新建会话") }
+                    ) { Text(if (canCreate) "新建会话" else "为何不能新建") }
                 }
                 Button(onClick = { hosts.forEach { it.callbacks.onReconnect() } }) { Text("刷新") }
             }
@@ -184,7 +198,7 @@ internal fun V2SessionsPanel(
                 }
                 if (onAddHost != null) {
                     V2ProjectFilterRow(
-                        label = "＋ 配对新主机",
+                        label = "配对新主机",
                         detail = "PAIR",
                         selected = false,
                         onClick = {
@@ -233,14 +247,14 @@ internal fun V2SessionsPanel(
                 )
             } else if (onAddHost != null) {
                 Text(
-                    "＋ 配对新主机",
+                    "配对主机",
                     modifier = Modifier
                         .clip(RoundedCornerShape(99.dp))
                         .background(v2.card)
                         .clickable(role = Role.Button) { onAddHost() }
                         .padding(horizontal = 10.dp, vertical = 5.dp)
                         .testTag("add-host-panel"),
-                    color = v2.tx3,
+                    color = v2.tx2,
                     fontSize = 10.sp,
                     maxLines = 1,
                     softWrap = false,
@@ -281,7 +295,6 @@ internal fun V2SessionsPanel(
                 items(members, key = { "${it.first.hostId}/${it.second.sessionId}" }) { (face, session) ->
                     V2SessionRow(
                         session = session,
-                        presets = face.state.agentPresets,
                         stale = face.state.isStaleView(),
                         hostLabel = if (multiHost) face.label else null,
                         onClick = { onOpenSession(face.hostId, session.sessionId) },
@@ -383,7 +396,6 @@ internal fun V2ProjectFilterRow(label: String, detail: String, selected: Boolean
 @Composable
 private fun V2SessionRow(
     session: SessionDirectoryEntry,
-    presets: List<AgentPresetProjection>,
     stale: Boolean,
     hostLabel: String?,
     onClick: () -> Unit,
@@ -424,23 +436,12 @@ private fun V2SessionRow(
             Text(
                 text = buildString {
                     append(if (stale) "STALE" else sessionStatusZh(session))
-                    // S-vocab-ext: lineage fact, present only for sub-agent children.
                     if (session.isSubagentChild) append(" · 子代理")
-                    // S-mode-select: the log-resolved preset when the Host projects one.
-                    agentPresetLabel(presets, session.agentPreset)?.let { append(" · $it") }
-                    append(" · ")
-                    append(session.workspaceLabel ?: "workspace 不可用")
-                    // S-multi-host: the owning Host is a first-class row fact.
                     hostLabel?.let { append(" · $it") }
                     append(" · ")
                     append(relativeTimeZh(session.updatedAtMs))
                     if (session.pendingApprovalCount > 0) append(" · ${session.pendingApprovalCount} 项待审批")
                     if (session.pendingInputCount > 0) append(" · ${session.pendingInputCount} 项待输入")
-                    // S-usage: real provider-reported totals when the Host projects them;
-                    // an absent unit adds no segment (absence is never rendered as zero).
-                    session.usage?.tokens?.let { tokens ->
-                        append(" · ${compactTokenCount(tokens.totalTokens)} tok")
-                    }
                 },
                 color = if (attention && !stale) v2.amber else v2.tx3,
                 fontSize = 10.sp,

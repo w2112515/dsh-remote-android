@@ -234,6 +234,24 @@ internal fun V2App(
         createEligible.isNotEmpty() -> ({ createHostSheetOpen = true })
         else -> null
     }
+    var createBlockedOpen by rememberSaveable { mutableStateOf(false) }
+    val onCreateClick: () -> Unit = {
+        startCreate?.invoke() ?: run { createBlockedOpen = true }
+    }
+    if (createBlockedOpen) {
+        V2Sheet(
+            title = "现在不能新建会话",
+            subtitle = "CREATE SESSION",
+            onDismiss = { createBlockedOpen = false },
+        ) {
+            Text(
+                createBlockedReason(hosts.map { it.state }),
+                color = v2.tx2,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+        }
+    }
 
     val chatFace = hosts.firstOrNull { it.hostId == chatHostId }
 
@@ -414,35 +432,50 @@ internal fun V2App(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // 原型头部动作按 tab 分派（P7 H11）：会话页 = 主机管理（带舰队状态点）
-            // 与新建 + 两个圆角图标按钮；通知页 = 全部已读；其余无。
+            // 会话页 = 带「主机」标签的管理入口 + 新建 ＋（空点击改为说明原因）；
+            // 通知页 = 全部已读 + 清除已读/清空。
             when (V2Tab.valueOf(tab)) {
                 V2Tab.SESSIONS -> Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val fleet = fleetPhase(hosts, v2)
-                    Box {
-                        V2HeaderIconButton(
-                            onClick = { hostMgmtOpen = true },
-                            tag = "fleet-pill",
-                            description = "主机管理 · ${fleet.first}",
-                        ) { V2HostGlyph(color = v2.tx2) }
-                        Box(
-                            Modifier
-                                .align(Alignment.TopEnd)
-                                .offset(x = 2.dp, y = (-2).dp)
-                                .size(8.dp)
-                                .background(v2.bg, CircleShape)
-                                .padding(1.5.dp)
-                                .background(fleet.second, CircleShape),
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(v2.card)
+                            .border(1.dp, v2.line, RoundedCornerShape(12.dp))
+                            .clickable(role = Role.Button) { hostMgmtOpen = true }
+                            .padding(start = 8.dp, end = 10.dp, top = 7.dp, bottom = 7.dp)
+                            .semantics { contentDescription = "主机管理 · ${fleet.first}" }
+                            .testTag("fleet-pill"),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box {
+                            V2HostGlyph(color = v2.tx2)
+                            Box(
+                                Modifier
+                                    .align(Alignment.TopEnd)
+                                    .offset(x = 2.dp, y = (-2).dp)
+                                    .size(8.dp)
+                                    .background(v2.bg, CircleShape)
+                                    .padding(1.5.dp)
+                                    .background(fleet.second, CircleShape),
+                            )
+                        }
+                        Text(
+                            "主机",
+                            color = v2.tx,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
                         )
                     }
                     V2HeaderIconButton(
-                        onClick = startCreate ?: {},
-                        enabled = startCreate != null,
+                        onClick = onCreateClick,
+                        enabled = true,
                         tag = "create-session",
-                        description = "新建会话",
+                        description = if (startCreate != null) "新建会话" else "新建会话 · 当前不可用",
                     ) {
                         Text(
                             "＋",
@@ -452,19 +485,46 @@ internal fun V2App(
                         )
                     }
                 }
-                V2Tab.NOTIFS -> Text(
-                    "全部已读",
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(99.dp))
-                        .background(v2.card)
-                        .clickable(enabled = unreadBadge > 0, role = Role.Button) {
-                            notificationCenter.markAllRead()
-                        }
-                        .padding(horizontal = 11.dp, vertical = 6.dp),
-                    color = if (unreadBadge > 0) v2.tx2 else v2.tx3,
-                    fontSize = 10.5.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                V2Tab.NOTIFS -> {
+                    val hasRead = notifications.any { !it.unread }
+                    val allRead = notifications.isNotEmpty() && unreadBadge == 0
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "全部已读",
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(99.dp))
+                                .background(v2.card)
+                                .clickable(enabled = unreadBadge > 0, role = Role.Button) {
+                                    notificationCenter.markAllRead()
+                                }
+                                .padding(horizontal = 11.dp, vertical = 6.dp),
+                            color = if (unreadBadge > 0) v2.tx2 else v2.tx3,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            if (allRead) "清空" else "清除已读",
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(99.dp))
+                                .background(v2.card)
+                                .clickable(
+                                    enabled = hasRead || allRead,
+                                    role = Role.Button,
+                                ) {
+                                    if (allRead) notificationCenter.clearAll()
+                                    else notificationCenter.clearRead()
+                                }
+                                .padding(horizontal = 11.dp, vertical = 6.dp)
+                                .testTag(if (allRead) "notif-clear-all" else "notif-clear-read"),
+                            color = if (hasRead || allRead) v2.tx2 else v2.tx3,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
                 else -> Unit
             }
         }
@@ -526,7 +586,7 @@ internal fun V2App(
         // Panel body
         Box(Modifier.weight(1f)) {
             when (V2Tab.valueOf(tab)) {
-                V2Tab.SESSIONS -> V2SessionsPanel(hosts, openSession, startCreate, onAddHost)
+                V2Tab.SESSIONS -> V2SessionsPanel(hosts, openSession, onCreateClick, onAddHost)
                 V2Tab.APPROVALS -> V2ApprovalsPanel(hosts, openSession)
                 V2Tab.ARTIFACTS -> V2ArtifactsPanel(hosts, seenArtifactIds, openArtifact)
                 V2Tab.NOTIFS -> V2NotificationsPanel(
@@ -540,6 +600,7 @@ internal fun V2App(
                             openSession(notification.hostId, notification.sessionId)
                         }
                     },
+                    onDismiss = notificationCenter::dismiss,
                 )
             }
         }
@@ -628,24 +689,31 @@ internal fun V2App(
                     Box {
                         V2TabIcon(option, color)
                         if (badge > 0) {
-                            Text(
-                                if (badge > 99) "99+" else badge.toString(),
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .offset(x = 9.dp, y = (-4).dp)
-                                    .background(
-                                        when (option) {
-                                            V2Tab.APPROVALS -> v2.amber
-                                            V2Tab.NOTIFS -> v2.red
-                                            else -> v2.blue
-                                        },
-                                        RoundedCornerShape(99.dp),
-                                    )
-                                    .padding(horizontal = 4.dp, vertical = 0.5.dp),
-                                color = v2.bg,
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
+                            if (option == V2Tab.APPROVALS) {
+                                Text(
+                                    if (badge > 99) "99+" else badge.toString(),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = 7.dp, y = (-5).dp)
+                                        .background(v2.amber, RoundedCornerShape(99.dp))
+                                        .padding(horizontal = 4.dp, vertical = 0.dp),
+                                    color = v2.bg,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    lineHeight = 11.sp,
+                                )
+                            } else {
+                                Box(
+                                    Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = 3.dp, y = (-1).dp)
+                                        .size(7.dp)
+                                        .background(
+                                            if (option == V2Tab.NOTIFS) v2.red else v2.blue,
+                                            CircleShape,
+                                        ),
+                                )
+                            }
                         }
                     }
                     Text(
@@ -975,19 +1043,19 @@ private fun V2HostSheet(
         }
         if (onAddHost != null) {
             Text(
-                "＋ 配对新主机",
+                "配对新主机",
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(v2.card)
+                    .background(v2.blue.copy(alpha = 0.12f))
                     .clickable(role = Role.Button) {
                         onDismiss()
                         onAddHost()
                     }
-                    .padding(horizontal = 12.dp, vertical = 11.dp)
+                    .padding(horizontal = 12.dp, vertical = 12.dp)
                     .testTag("add-host"),
-                color = v2.tx2,
-                fontSize = 11.sp,
+                color = v2.blue,
+                fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
             )
         }

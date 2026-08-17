@@ -157,6 +157,18 @@ internal class V2NotificationCenter {
         _notifications.update { list -> list.map { it.copy(unread = false) } }
     }
 
+    fun dismiss(id: Long) {
+        _notifications.update { list -> list.filterNot { it.id == id } }
+    }
+
+    fun clearRead() {
+        _notifications.update { list -> list.filter { it.unread } }
+    }
+
+    fun clearAll() {
+        _notifications.value = emptyList()
+    }
+
     private companion object {
         const val MAX_NOTIFICATIONS = 100
     }
