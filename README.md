@@ -2,7 +2,7 @@
 
 **Android phone client for [DSH Remote Host](https://github.com/w2112515/dsh-remote-host).**
 
-Install the Host plugin on a Windows PC running [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh web`, then sideload **one APK** from [Releases](https://github.com/w2112515/dsh-remote-android/releases). This repository is the Android app, not a DSH plugin. A marketplace pack cannot install it.
+Install the Host plugin on a Windows PC running [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh web`, then sideload **one APK** from [Releases](https://github.com/w2112515/dsh-remote-android/releases). This repository is the Android app, not a DSH plugin.
 
 English | [中文](README.zh-CN.md)
 
@@ -65,7 +65,6 @@ Android Studio, or:
 | --- | --- |
 | Host plugin | https://github.com/w2112515/dsh-remote-host |
 | This APK | https://github.com/w2112515/dsh-remote-android |
-| Marketplace pack listing | https://github.com/w2112515/dsh-remote-pack |
 | LINUX DO | https://linux.do |
 
 ## License

@@ -2,7 +2,7 @@
 
 **[DSH Remote Host](https://github.com/w2112515/dsh-remote-host) 的 Android 手机客户端。**
 
-先在运行 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh web` 的 Windows 电脑上安装 Host 插件，再从 [Releases](https://github.com/w2112515/dsh-remote-android/releases) 侧载 **一个 APK**。本仓库是 Android 应用，不是 DSH 插件。市场整合包装不了它。
+先在运行 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `dsh web` 的 Windows 电脑上安装 Host 插件，再从 [Releases](https://github.com/w2112515/dsh-remote-android/releases) 侧载 **一个 APK**。本仓库是 Android 应用，不是 DSH 插件。
 
 [English](README.md) | 中文
 
@@ -65,7 +65,6 @@ Android Studio，或：
 | --- | --- |
 | Host 插件 | https://github.com/w2112515/dsh-remote-host |
 | 本 APK | https://github.com/w2112515/dsh-remote-android |
-| 市场整合包 | https://github.com/w2112515/dsh-remote-pack |
 | LINUX DO | https://linux.do |
 
 ## 许可

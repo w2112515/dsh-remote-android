@@ -9,7 +9,7 @@ This repository is the Android application, not a DSH plugin.
 - Host plugin (install first): https://github.com/w2112515/dsh-remote-host
   `dsh plugin --profile web add @w2112515/dsh-remote-host`
   Then Settings → Mobile access on the PC.
-- A marketplace pack cannot install this APK.
+- The APK is a separate download, not a DSH plugin.
 
 The phone can list Host sessions, chat, create a workspace-bound session, approve tools, and review artifacts. Absolute paths stay on the Host. Same Wi-Fi only. Windows x64 is the reviewed Host platform.
 
