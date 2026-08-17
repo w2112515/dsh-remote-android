@@ -1,0 +1,16 @@
+# DSH Remote Android
+
+> Android phone client for DSH Remote Host. Pair to DeepSeek Harness on the same LAN.
+
+This repository is the Android application, not a DSH plugin.
+
+- Releases / APK: https://github.com/w2112515/dsh-remote-android/releases
+- Debug package id: `dev.dshremote.gate0c`
+- Host plugin (install first): https://github.com/w2112515/dsh-remote-host
+  `dsh plugin --profile web add @w2112515/dsh-remote-host`
+  Then Settings → Mobile access on the PC.
+- A marketplace pack cannot install this APK.
+
+The phone can list Host sessions, chat, create a workspace-bound session, approve tools, and review artifacts. Absolute paths stay on the Host. Same Wi-Fi only. Windows x64 is the reviewed Host platform.
+
+Full facts: https://github.com/w2112515/dsh-remote-host/blob/main/llms.txt
