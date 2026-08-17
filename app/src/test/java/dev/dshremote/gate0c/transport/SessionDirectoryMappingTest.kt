@@ -100,6 +100,68 @@ class SessionDirectoryMappingTest {
         assertEquals("android-app", entries.single { it.sessionId == "unlabeled" }.workspaceLabel)
     }
 
+    @Test
+    fun updateSessionInsertsAMissingCreatedRow() {
+        val listed = listOf(entry("listed", updatedAtMs = 10))
+        val next = listed.updateSession(
+            sessionId = "android-new",
+            title = null,
+            running = false,
+            updatedAtMs = 20,
+        )
+        assertEquals(listOf("android-new", "listed"), next.map { it.sessionId })
+        assertEquals(null, next.single { it.sessionId == "android-new" }.title)
+    }
+
+    @Test
+    fun updateSessionStillPatchesAnExistingRow() {
+        val listed = listOf(entry("listed", title = "Old", running = false, updatedAtMs = 10))
+        val next = listed.updateSession(sessionId = "listed", title = "New", running = true)
+        assertEquals(listOf("listed"), next.map { it.sessionId })
+        assertEquals("New", next.single().title)
+        assertEquals(true, next.single().running)
+        assertEquals(10L, next.single().updatedAtMs)
+    }
+
+    @Test
+    fun upsertCreatedSessionKeepsWorkspaceFacts() {
+        val next = emptyList<SessionDirectoryEntry>().upsertCreatedSession(
+            sessionId = "android-new",
+            workspaceLabel = "phone-ab",
+            agentPreset = "build",
+            updatedAtMs = 42,
+        )
+        val row = next.single()
+        assertEquals("android-new", row.sessionId)
+        assertEquals("phone-ab", row.workspaceLabel)
+        assertEquals("build", row.agentPreset)
+        assertEquals(42L, row.updatedAtMs)
+    }
+
+    @Test
+    fun helloMergeKeepsABlankCreateTheHostOmitted() {
+        val hello = listOf(entry("listed", updatedAtMs = 10))
+        val previous = listOf(entry("android-new", workspaceLabel = "phone-ab", updatedAtMs = 20))
+        val merged = mergeKeptSessionIntoDirectory(hello, "android-new", previous)
+        assertEquals(listOf("android-new", "listed"), merged.map { it.sessionId })
+        assertEquals("phone-ab", merged.single { it.sessionId == "android-new" }.workspaceLabel)
+        assertEquals(hello, mergeKeptSessionIntoDirectory(hello, "listed", previous))
+    }
+
+    private fun entry(
+        id: String,
+        title: String? = null,
+        running: Boolean = false,
+        updatedAtMs: Long = 0,
+        workspaceLabel: String? = null,
+    ) = SessionDirectoryEntry(
+        sessionId = id,
+        title = title,
+        running = running,
+        updatedAtMs = updatedAtMs,
+        workspaceLabel = workspaceLabel,
+    )
+
     private fun summary(
         id: String,
         running: Boolean,

@@ -856,6 +856,21 @@ class Gate0CClient(
             if (pendingCommand != null || commandRecoveryBlocked) return null
         }
         val newSessionId = "android-${UUID.randomUUID()}"
+        val workspaceLabel = if (!cleanName.isNullOrEmpty()) {
+            cleanName
+        } else {
+            workspaceId?.let { id -> current.workspaces.find { it.workspaceId == id }?.label }
+        }
+        mutableState.update { value ->
+            value.copy(
+                sessions = value.sessions.upsertCreatedSession(
+                    sessionId = newSessionId,
+                    workspaceLabel = workspaceLabel,
+                    agentPreset = agentPreset,
+                    updatedAtMs = System.currentTimeMillis(),
+                ),
+            )
+        }
         scope.launch {
             val command = try {
                 synchronized(commandLock) {
@@ -1020,6 +1035,18 @@ class Gate0CClient(
             if (pendingCommand != null || commandRecoveryBlocked) return null
         }
         val childSessionId = "android-${UUID.randomUUID()}"
+        val source = current.sessions.find { it.sessionId == sourceSessionId }
+        mutableState.update { value ->
+            value.copy(
+                sessions = value.sessions.upsertCreatedSession(
+                    sessionId = childSessionId,
+                    workspaceLabel = source?.workspaceLabel,
+                    projectLabel = source?.projectLabel,
+                    agentPreset = source?.agentPreset,
+                    updatedAtMs = System.currentTimeMillis(),
+                ),
+            )
+        }
         scope.launch {
             val command = try {
                 synchronized(commandLock) {
@@ -1257,15 +1284,18 @@ class Gate0CClient(
     }
 
     /**
-     * S-mode-select: open a Session this device just created. It is blank, so
-     * the directory hides it and there is nothing cached to resume — reset the
-     * view to an honest empty Session and subscribe for a fresh snapshot.
+     * S-mode-select: open a Session this device just created. Host hello still
+     * omits blank rows; keep a local directory entry so backing out of chat
+     * shows the new conversation without a reconnect.
      */
     private fun openCreatedSession(sessionId: String, agentPreset: String?) {
         if (selectedSessionId != sessionId) dropControl(releaseRemote = true)
+        val previousSessionId = state.value.sessionId
         selectedSessionId = sessionId
         recoveryPending = false
         update(ConnectionPhase.SYNCHRONIZING, "Opening the newly created Session.") {
+            val inherited = sessions.find { it.sessionId == sessionId }
+                ?: sessions.find { it.sessionId == previousSessionId }
             copy(
                 sessionId = sessionId,
                 sessionTitle = null,
@@ -1294,6 +1324,13 @@ class Gate0CClient(
                 controlLease = synchronized(commandLock) { activeControl?.toStatus() },
                 controlHeldByOther = false,
                 failure = null,
+                sessions = sessions.upsertCreatedSession(
+                    sessionId = sessionId,
+                    workspaceLabel = inherited?.workspaceLabel,
+                    projectLabel = inherited?.projectLabel,
+                    agentPreset = agentPreset ?: inherited?.agentPreset,
+                    updatedAtMs = System.currentTimeMillis(),
+                ),
             )
         }
         subscribeFresh("Synchronizing the new Session from a fresh Host snapshot.")
@@ -1349,7 +1386,7 @@ class Gate0CClient(
                 if (previousHostInstanceId != null && previousHostInstanceId != hello.hostInstanceId) {
                     dropControl(releaseRemote = false)
                 }
-                val sessions = sessionDirectoryEntries(hello.sessionsList)
+                val helloSessions = sessionDirectoryEntries(hello.sessionsList)
                 // S-mode-select: the connect-time preset roster; authoring never
                 // crosses, so a stale row fails honestly at selection time.
                 val presets = agentPresetProjections(hello.agentPresetsList)
@@ -1385,8 +1422,13 @@ class Gate0CClient(
                 }
                 val keepId = helloSelectedSessionId(
                     current = selectedSessionId,
-                    directoryIds = sessions.map { it.sessionId },
+                    directoryIds = helloSessions.map { it.sessionId },
                     pendingCreateSessionId = pendingCreateId,
+                )
+                val sessions = mergeKeptSessionIntoDirectory(
+                    helloSessions = helloSessions,
+                    keepId = keepId,
+                    previous = state.value.sessions,
                 )
                 selectedSessionId = keepId
                 val selected = sessions.find { it.sessionId == keepId }
@@ -1732,6 +1774,11 @@ class Gate0CClient(
                     title = snapshot.session.title.takeIf(String::isNotBlank),
                     running = snapshot.session.running,
                     pendingInputCount = snapshot.session.pendingInputCount,
+                    updatedAtMs = if (sessions.none { it.sessionId == snapshot.session.sessionId }) {
+                        System.currentTimeMillis()
+                    } else {
+                        null
+                    },
                 ).replaceSessionUsage(snapshot.session.sessionId, snapshotUsage)
                     .replaceSessionSubagent(snapshot.session.sessionId, snapshotSubagent)
                     .replaceSessionAgentPreset(snapshot.session.sessionId, snapshotAgentPreset)
@@ -2381,8 +2428,8 @@ class Gate0CClient(
                     )
                 }
                 // S-mode-select: a committed creation opens the fresh blank
-                // Session — hidden from the directory until its first turn, but
-                // resolvable for subscription.
+                // Session. Host hello still omits blanks; the local directory
+                // already holds the row from queue time.
                 if (
                     receipt.outcome == "COMMITTED" &&
                     current.operation == PendingCommandOperation.CREATE_SESSION

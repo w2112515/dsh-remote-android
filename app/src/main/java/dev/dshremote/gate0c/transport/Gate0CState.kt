@@ -802,6 +802,11 @@ internal fun SubagentProjection?.mergedWith(change: ProtoSubagentView): Subagent
     )
 }
 
+internal val sessionDirectoryOrder = compareByDescending<SessionDirectoryEntry> { it.pendingInputCount > 0 }
+    .thenByDescending { it.pendingApprovalCount > 0 }
+    .thenByDescending { it.running }
+    .thenByDescending { it.updatedAtMs }
+
 internal fun sessionDirectoryEntries(sessions: List<ProtoSessionSummary>): List<SessionDirectoryEntry> =
     sessions.map { session ->
         SessionDirectoryEntry(
@@ -824,32 +829,91 @@ internal fun sessionDirectoryEntries(sessions: List<ProtoSessionSummary>): List<
                 null
             },
         )
-    }.sortedWith(
-        compareByDescending<SessionDirectoryEntry> { it.pendingInputCount > 0 }
-            .thenByDescending { it.pendingApprovalCount > 0 }
-            .thenByDescending { it.running }
-            .thenByDescending { it.updatedAtMs },
-    )
+    }.sortedWith(sessionDirectoryOrder)
 
+/**
+ * Patch one directory row. A Session this device just created is absent from
+ * Host hello (blank rows are omitted) and was previously dropped here too —
+ * insert it so the list does not wait for the next reconnect.
+ */
 internal fun List<SessionDirectoryEntry>.updateSession(
     sessionId: String,
     title: String? = null,
     running: Boolean? = null,
     pendingApprovalCount: Int? = null,
     pendingInputCount: Int? = null,
-): List<SessionDirectoryEntry> = map { entry ->
-    if (entry.sessionId != sessionId) entry else entry.copy(
-        title = title ?: entry.title,
-        running = running ?: entry.running,
-        pendingApprovalCount = pendingApprovalCount ?: entry.pendingApprovalCount,
-        pendingInputCount = pendingInputCount ?: entry.pendingInputCount,
+    updatedAtMs: Long? = null,
+): List<SessionDirectoryEntry> {
+    val existing = find { it.sessionId == sessionId }
+    val row = if (existing == null) {
+        SessionDirectoryEntry(
+            sessionId = sessionId,
+            title = title,
+            running = running ?: false,
+            updatedAtMs = updatedAtMs ?: 0L,
+            workspaceLabel = null,
+            pendingApprovalCount = pendingApprovalCount ?: 0,
+            pendingInputCount = pendingInputCount ?: 0,
+        )
+    } else {
+        existing.copy(
+            title = title ?: existing.title,
+            running = running ?: existing.running,
+            pendingApprovalCount = pendingApprovalCount ?: existing.pendingApprovalCount,
+            pendingInputCount = pendingInputCount ?: existing.pendingInputCount,
+            updatedAtMs = updatedAtMs ?: existing.updatedAtMs,
+        )
+    }
+    return (filterNot { it.sessionId == sessionId } + row).sortedWith(sessionDirectoryOrder)
+}
+
+/** Local row for a Session this device just created or forked. */
+internal fun List<SessionDirectoryEntry>.upsertCreatedSession(
+    sessionId: String,
+    workspaceLabel: String? = null,
+    projectLabel: String? = null,
+    agentPreset: String? = null,
+    updatedAtMs: Long,
+): List<SessionDirectoryEntry> {
+    val existing = find { it.sessionId == sessionId }
+    val row = SessionDirectoryEntry(
+        sessionId = sessionId,
+        title = existing?.title,
+        running = existing?.running ?: false,
+        updatedAtMs = updatedAtMs,
+        workspaceLabel = workspaceLabel ?: existing?.workspaceLabel,
+        pendingApprovalCount = existing?.pendingApprovalCount ?: 0,
+        pendingInputCount = existing?.pendingInputCount ?: 0,
+        usage = existing?.usage,
+        parentSessionId = existing?.parentSessionId,
+        origin = existing?.origin,
+        subagent = existing?.subagent,
+        agentPreset = agentPreset ?: existing?.agentPreset,
+        model = existing?.model,
+        projectLabel = projectLabel ?: existing?.projectLabel,
     )
-}.sortedWith(
-    compareByDescending<SessionDirectoryEntry> { it.pendingInputCount > 0 }
-        .thenByDescending { it.pendingApprovalCount > 0 }
-        .thenByDescending { it.running }
-        .thenByDescending { it.updatedAtMs },
-)
+    return (filterNot { it.sessionId == sessionId } + row).sortedWith(sessionDirectoryOrder)
+}
+
+/**
+ * Host hello omits blank Sessions. Keep the one this device is holding so a
+ * reconnect does not erase a just-created row from the list.
+ */
+internal fun mergeKeptSessionIntoDirectory(
+    helloSessions: List<SessionDirectoryEntry>,
+    keepId: String?,
+    previous: List<SessionDirectoryEntry>,
+): List<SessionDirectoryEntry> {
+    if (keepId.isNullOrEmpty() || helloSessions.any { it.sessionId == keepId }) return helloSessions
+    val kept = previous.find { it.sessionId == keepId } ?: SessionDirectoryEntry(
+        sessionId = keepId,
+        title = null,
+        running = false,
+        updatedAtMs = 0L,
+        workspaceLabel = null,
+    )
+    return (helloSessions + kept).sortedWith(sessionDirectoryOrder)
+}
 
 /** Explicitly set (or clear) one entry's usage view without touching the sort order. */
 internal fun List<SessionDirectoryEntry>.replaceSessionUsage(
