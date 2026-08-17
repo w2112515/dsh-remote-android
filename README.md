@@ -6,6 +6,10 @@ Install the Host plugin on a Windows PC running [DeepSeek Harness](https://githu
 
 English | [中文](README.zh-CN.md)
 
+This project acknowledges the [LINUX DO](https://linux.do) community.
+
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-acknowledged-6A8DFF?style=flat-square)](https://linux.do)
+
 <p>
   <img src="docs/phone/sessions.png" width="220" alt="DSH Remote Android session list, grouped by Host project">
   <img src="docs/phone/chat.png" width="220" alt="DSH Remote Android chat with usage, model, and agent preset">
@@ -62,6 +66,7 @@ Android Studio, or:
 | Host plugin | https://github.com/w2112515/dsh-remote-host |
 | This APK | https://github.com/w2112515/dsh-remote-android |
 | Marketplace pack listing | https://github.com/w2112515/dsh-remote-pack |
+| LINUX DO | https://linux.do |
 
 ## License
 

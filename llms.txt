@@ -14,3 +14,4 @@ This repository is the Android application, not a DSH plugin.
 The phone can list Host sessions, chat, create a workspace-bound session, approve tools, and review artifacts. Absolute paths stay on the Host. Same Wi-Fi only. Windows x64 is the reviewed Host platform.
 
 Full facts: https://github.com/w2112515/dsh-remote-host/blob/main/llms.txt
+LINUX DO: this project acknowledges https://linux.do

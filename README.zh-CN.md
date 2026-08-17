@@ -6,6 +6,10 @@
 
 [English](README.md) | 中文
 
+本项目积极参与并认可 [LINUX DO 社区](https://linux.do)。
+
+[![LINUX DO](https://img.shields.io/badge/LINUX%20DO-%E9%93%BE%E6%8E%A5%E8%AE%A4%E5%8F%AF-6A8DFF?style=flat-square)](https://linux.do)
+
 <p>
   <img src="docs/phone/sessions.png" width="220" alt="DSH Remote 手机端：按项目分组的会话列表">
   <img src="docs/phone/chat.png" width="220" alt="DSH Remote 手机端：对话、用量、模型和 Agent 预设">
@@ -62,6 +66,7 @@ Android Studio，或：
 | Host 插件 | https://github.com/w2112515/dsh-remote-host |
 | 本 APK | https://github.com/w2112515/dsh-remote-android |
 | 市场整合包 | https://github.com/w2112515/dsh-remote-pack |
+| LINUX DO | https://linux.do |
 
 ## 许可
 
