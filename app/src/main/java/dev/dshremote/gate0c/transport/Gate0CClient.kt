@@ -11,6 +11,8 @@ import android.util.Log
 import com.google.protobuf.ByteString
 import dev.dshremote.protocol.v1alpha.Ack
 import dev.dshremote.protocol.v1alpha.AcquireControl
+import dev.dshremote.protocol.v1alpha.ReleaseControl
+import dev.dshremote.protocol.v1alpha.RenewControl
 import dev.dshremote.protocol.v1alpha.ApprovalDecision
 import dev.dshremote.protocol.v1alpha.ApprovalInteraction
 import dev.dshremote.protocol.v1alpha.ApprovalRisk as ProtoApprovalRisk
@@ -124,6 +126,11 @@ class Gate0CClient(
     private var authorizationProbeJob: Job? = null
     private var pendingHeartbeatNonce: String? = null
     private var activeControl: ActiveControl? = null
+    @Volatile private var controlRetention = false
+    @Volatile private var releaseWhenGranted = false
+    private var controlOpInFlight = false
+    private var controlRenewJob: Job? = null
+    private val controlWaiters = mutableListOf<CompletableDeferred<Boolean>>()
     private var pendingCommand: PendingRemoteCommand? = null
     private var commandRecoveryBlocked = false
     private val awaitingUnlockRetry = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -137,6 +144,7 @@ class Gate0CClient(
         connectStartedAtNanos.set(SystemClock.elapsedRealtimeNanos())
         awaitingUnlockRetry.set(false)
         Log.i(LOG_TAG, "connect_start epoch=$epoch")
+        dropControl(releaseRemote = true)
         closeTransport()
         recoveryPending = false
         pendingResume = null
@@ -265,6 +273,7 @@ class Gate0CClient(
 
     fun pair(invitationUri: String) {
         val epoch = connectionEpoch.incrementAndGet()
+        dropControl(releaseRemote = true)
         closeTransport()
         synchronized(commandLock) {
             pendingCommandStore.clear()
@@ -379,25 +388,183 @@ class Gate0CClient(
         update(log = "Sent one command probe; the read-only Host must reject it before any DSH effect.")
     }
 
-    fun acquireControl() {
+    /**
+     * Silent write-right for the open session. Viewing never calls this;
+     * typing, attaching, sending, stopping or changing the model does.
+     */
+    fun prepareControl() {
         val current = state.value
+        if (current.controlHeldByOther) return
+        val sessionId = selectedSessionId ?: return
+        if (current.controlLease?.let { it.sessionId == sessionId && it.isUsable() } == true) return
         if (current.phase != ConnectionPhase.READY && current.phase != ConnectionPhase.RECONCILED) return
         if (!hasCapabilities(current.grantedCapabilities, CONTROL_CAPABILITIES)) return
-        if (current.pendingCommand != null) return
-        if (current.commandRecoveryBlocked) return
-        val sessionId = selectedSessionId ?: return
-        val requestId = "control-${UUID.randomUUID()}"
+        if (current.pendingCommand != null || current.commandRecoveryBlocked) return
+        scope.launch { ensureControl(wait = false) }
+    }
+
+    /**
+     * Keep a held write-right alive while the chat is in the foreground.
+     * Viewing does not acquire; leaving or backgrounding releases so the
+     * Host Web can write immediately.
+     */
+    fun retainControl(retain: Boolean) {
+        controlRetention = retain
+        if (retain) {
+            releaseWhenGranted = false
+            scheduleControlRenew()
+        } else {
+            releaseWhenGranted = true
+            dropControl(releaseRemote = true)
+        }
+    }
+
+    /** Compatibility alias used by the legacy surface; same silent prepare. */
+    fun acquireControl() {
+        prepareControl()
+    }
+
+    private fun usableControl(sessionId: String, slackMs: Long = 0L): ActiveControl? {
+        val now = System.currentTimeMillis()
+        return activeControl?.takeIf { it.sessionId == sessionId && it.expiresAtMs > now + slackMs }
+    }
+
+    private suspend fun ensureControl(wait: Boolean = true): Boolean {
+        val sessionId = selectedSessionId ?: return false
+        val current = state.value
+        if (current.phase != ConnectionPhase.READY && current.phase != ConnectionPhase.RECONCILED) return false
+        if (!hasCapabilities(current.grantedCapabilities, CONTROL_CAPABILITIES)) return false
+        if (current.pendingCommand != null || current.commandRecoveryBlocked) return false
+        synchronized(commandLock) {
+            if (usableControl(sessionId, slackMs = 1_500L) != null) return true
+        }
+        if (!wait) {
+            val sendAcquire: Boolean
+            synchronized(commandLock) {
+                if (usableControl(sessionId, slackMs = 1_500L) != null) return true
+                if (controlOpInFlight) return false
+                controlOpInFlight = true
+                sendAcquire = true
+            }
+            if (sendAcquire && !writeAcquire(sessionId)) {
+                synchronized(commandLock) { controlOpInFlight = false }
+                return false
+            }
+            return false
+        }
+        val waiter = CompletableDeferred<Boolean>()
+        val sendAcquire: Boolean
+        synchronized(commandLock) {
+            if (usableControl(sessionId, slackMs = 1_500L) != null) return true
+            controlWaiters.add(waiter)
+            sendAcquire = !controlOpInFlight
+            if (sendAcquire) controlOpInFlight = true
+        }
+        if (sendAcquire && !writeAcquire(sessionId)) {
+            synchronized(commandLock) {
+                controlOpInFlight = false
+                completeControlWaiters(false)
+            }
+            return false
+        }
+        val ok = withTimeoutOrNull(CONTROL_PREPARE_TIMEOUT_MS) { waiter.await() }
+        if (ok == null) {
+            synchronized(commandLock) {
+                controlWaiters.remove(waiter)
+                if (!waiter.isCompleted) waiter.complete(false)
+            }
+            return false
+        }
+        return ok
+    }
+
+    private fun writeAcquire(sessionId: String): Boolean {
         val frame = ClientFrame.newBuilder()
             .setFrameId(nextFrameId())
             .setControlRequest(
                 ControlRequest.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId("control-${UUID.randomUUID()}")
                     .setSessionId(sessionId)
                     .setAcquire(AcquireControl.getDefaultInstance()),
             )
             .build()
-        if (write(frame)) {
-            update(log = "Requested Session control from the authenticated Host.")
+        val written = write(frame)
+        if (written) update(log = "Prepared Session write access for the open conversation.")
+        return written
+    }
+
+    private fun writeRenew(lease: ActiveControl) {
+        val frame = ClientFrame.newBuilder()
+            .setFrameId(nextFrameId())
+            .setControlRequest(
+                ControlRequest.newBuilder()
+                    .setRequestId("control-${UUID.randomUUID()}")
+                    .setSessionId(lease.sessionId)
+                    .setRenew(
+                        RenewControl.newBuilder()
+                            .setControl(ControlFence.newBuilder().setEpoch(lease.epoch).setToken(lease.token)),
+                    ),
+            )
+            .build()
+        if (write(frame)) update(log = "Extended Session write access.")
+    }
+
+    private fun writeRelease(lease: ActiveControl) {
+        val frame = ClientFrame.newBuilder()
+            .setFrameId(nextFrameId())
+            .setControlRequest(
+                ControlRequest.newBuilder()
+                    .setRequestId("control-${UUID.randomUUID()}")
+                    .setSessionId(lease.sessionId)
+                    .setRelease(
+                        ReleaseControl.newBuilder()
+                            .setControl(ControlFence.newBuilder().setEpoch(lease.epoch).setToken(lease.token)),
+                    ),
+            )
+            .build()
+        write(frame)
+    }
+
+    private fun releaseHeldControl() {
+        val lease = synchronized(commandLock) { activeControl } ?: return
+        writeRelease(lease)
+        synchronized(commandLock) { activeControl = null }
+        mutableState.update { it.copy(controlLease = null) }
+    }
+
+    private fun dropControl(releaseRemote: Boolean, heldByOther: Boolean = false) {
+        controlRenewJob?.cancel()
+        controlRenewJob = null
+        val lease = synchronized(commandLock) {
+            controlOpInFlight = false
+            completeControlWaiters(false)
+            val current = activeControl
+            activeControl = null
+            current
+        }
+        if (releaseRemote && lease != null) writeRelease(lease)
+        mutableState.update { it.copy(controlLease = null, controlHeldByOther = heldByOther) }
+    }
+
+    private fun completeControlWaiters(ok: Boolean) {
+        controlWaiters.forEach { waiter -> waiter.complete(ok) }
+        controlWaiters.clear()
+    }
+
+    private fun scheduleControlRenew() {
+        if (!controlRetention) return
+        val lease = synchronized(commandLock) { activeControl } ?: return
+        controlRenewJob?.cancel()
+        controlRenewJob = scope.launch {
+            while (controlRetention) {
+                val live = synchronized(commandLock) { activeControl } ?: return@launch
+                val waitMs = (live.expiresAtMs - System.currentTimeMillis() - 8_000L)
+                    .coerceIn(2_000L, 15_000L)
+                delay(waitMs)
+                if (!controlRetention) return@launch
+                val again = synchronized(commandLock) { activeControl } ?: return@launch
+                if (again.expiresAtMs - System.currentTimeMillis() <= 10_000L) writeRenew(again)
+            }
         }
     }
 
@@ -406,8 +573,10 @@ class Gate0CClient(
             // S-blob: staged images upload BEFORE the protected reservation —
             // the command records only committed content addresses, and an
             // interrupted upload leaves the draft and thumbnails untouched.
+            if (!ensureControl()) return@launch
             val uploadedIds = uploadComposerImages() ?: return@launch
             val attachmentIds = uploadedIds.ifEmpty { null }
+            if (!ensureControl()) return@launch
             val command = try {
                 synchronized(commandLock) {
                     if (pendingCommand != null) return@launch
@@ -503,10 +672,7 @@ class Gate0CClient(
             pendingCommand == null && !commandRecoveryBlocked &&
                 (current.phase == ConnectionPhase.READY || current.phase == ConnectionPhase.RECONCILED) &&
                 hasCapabilities(current.grantedCapabilities, SEND_CONTROL_CAPABILITIES) &&
-                current.localDraft.isNotBlank() &&
-                selectedSessionId?.let { id ->
-                    activeControl?.takeIf { it.sessionId == id && it.expiresAtMs > System.currentTimeMillis() }
-                } != null
+                current.localDraft.isNotBlank()
         }
         if (!eligible) return null
         val ids = committed.map { it.attachmentId }.toMutableList()
@@ -559,6 +725,7 @@ class Gate0CClient(
 
     fun stopActive() {
         scope.launch {
+            if (!ensureControl()) return@launch
             val command = try {
                 synchronized(commandLock) {
                     if (pendingCommand != null || commandRecoveryBlocked) return@launch
@@ -672,12 +839,19 @@ class Gate0CClient(
      * The same id retries to the same Session Host-side, so reconciliation can
      * never create a duplicate.
      */
-    fun createSession(agentPreset: String?): String? {
+    fun createSession(
+        agentPreset: String?,
+        workspaceId: String? = null,
+        newWorkspaceName: String? = null,
+    ): String? {
         // Cheap gates run synchronously so the returned id honestly means
         // "queued"; the protected reservation itself stays off the caller thread.
         val current = state.value
         if (current.phase != ConnectionPhase.READY && current.phase != ConnectionPhase.RECONCILED) return null
         if (!hasCapabilities(current.grantedCapabilities, SEND_CONTROL_CAPABILITIES)) return null
+        val cleanName = newWorkspaceName?.let(RemoteWorkspaceName::sanitize)
+        if (newWorkspaceName != null && cleanName == null) return null
+        if (cleanName != null && workspaceId.isNullOrBlank()) return null
         synchronized(commandLock) {
             if (pendingCommand != null || commandRecoveryBlocked) return null
         }
@@ -696,6 +870,8 @@ class Gate0CClient(
                             sessionId = newSessionId,
                             agentPreset = agentPreset,
                             createdAtMs = System.currentTimeMillis(),
+                            workspaceId = workspaceId,
+                            newWorkspaceName = cleanName,
                         )
                         pendingCommandStore.save(created)
                         pendingCommand = created
@@ -772,6 +948,7 @@ class Gate0CClient(
      */
     fun selectModel(provider: String, model: String, reasoningEffort: String?) {
         scope.launch {
+            if (!ensureControl()) return@launch
             val command = try {
                 synchronized(commandLock) {
                     if (pendingCommand != null || commandRecoveryBlocked) return@launch
@@ -999,6 +1176,7 @@ class Gate0CClient(
             if (current.sessionId != sessionId) current else current.copy(localDraft = bounded)
         }
         updateCachedPreferences(sessionId, draft = bounded)
+        if (bounded.isNotBlank()) prepareControl()
     }
 
     fun updateReadingPosition(anchorEntryId: String?, offsetPx: Int, followTail: Boolean) {
@@ -1020,10 +1198,8 @@ class Gate0CClient(
 
     fun selectSession(sessionId: String) {
         val session = state.value.sessions.find { it.sessionId == sessionId } ?: return
+        if (selectedSessionId != sessionId) dropControl(releaseRemote = true)
         selectedSessionId = sessionId
-        synchronized(commandLock) {
-            if (activeControl?.sessionId != sessionId) activeControl = null
-        }
         recoveryPending = false
         val workspace = synchronized(cacheLock) { cachedWorkspace }
         val cached = workspace?.projection(sessionId)
@@ -1068,6 +1244,7 @@ class Gate0CClient(
                 followTail = reading?.followTail ?: true,
                 readingAnchorUnavailable = anchorUnavailable,
                 controlLease = synchronized(commandLock) { activeControl?.toStatus() },
+                controlHeldByOther = false,
                 failure = null,
             )
         }
@@ -1085,10 +1262,8 @@ class Gate0CClient(
      * view to an honest empty Session and subscribe for a fresh snapshot.
      */
     private fun openCreatedSession(sessionId: String, agentPreset: String?) {
+        if (selectedSessionId != sessionId) dropControl(releaseRemote = true)
         selectedSessionId = sessionId
-        synchronized(commandLock) {
-            if (activeControl?.sessionId != sessionId) activeControl = null
-        }
         recoveryPending = false
         update(ConnectionPhase.SYNCHRONIZING, "Opening the newly created Session.") {
             copy(
@@ -1117,6 +1292,7 @@ class Gate0CClient(
                 followTail = true,
                 readingAnchorUnavailable = false,
                 controlLease = synchronized(commandLock) { activeControl?.toStatus() },
+                controlHeldByOther = false,
                 failure = null,
             )
         }
@@ -1126,6 +1302,7 @@ class Gate0CClient(
     fun close() {
         connectionEpoch.incrementAndGet()
         captureProjection(persistImmediately = true)
+        dropControl(releaseRemote = true)
         closeTransport()
         scope.cancel()
         update(ConnectionPhase.CLOSED, "Android lifecycle disposed the stream and channel.")
@@ -1170,7 +1347,7 @@ class Gate0CClient(
                 }
                 val previousHostInstanceId = state.value.hostInstanceId
                 if (previousHostInstanceId != null && previousHostInstanceId != hello.hostInstanceId) {
-                    synchronized(commandLock) { activeControl = null }
+                    dropControl(releaseRemote = false)
                 }
                 val sessions = sessionDirectoryEntries(hello.sessionsList)
                 // S-mode-select: the connect-time preset roster; authoring never
@@ -1185,6 +1362,11 @@ class Gate0CClient(
                 // Host merges remembered live registrations into every roster,
                 // so nothing this device saw live is lost across a reconnect.
                 val artifacts = hello.artifactsList.map(::artifactEntryStateOf)
+                val workspaces = hello.workspacesList.mapNotNull { row ->
+                    val id = row.workspaceId.trim().take(100)
+                    val label = row.label.trim().take(100)
+                    if (id.isEmpty() || label.isEmpty()) null else WorkspaceProjection(id, label)
+                }.take(64)
                 // S-blob: deployment intake bounds; absent ⟺ the Host accepts
                 // no attachments, and the composer affordance stays hidden.
                 val attachmentLimits = if (hello.hasAttachmentLimits()) {
@@ -1198,18 +1380,26 @@ class Gate0CClient(
                 } else {
                     null
                 }
-                val selected = sessions.find { it.sessionId == selectedSessionId } ?: sessions.firstOrNull()
-                selectedSessionId = selected?.sessionId
+                val pendingCreateId = synchronized(commandLock) {
+                    pendingCommand?.takeIf { it.operation == PendingCommandOperation.CREATE_SESSION }?.sessionId
+                }
+                val keepId = helloSelectedSessionId(
+                    current = selectedSessionId,
+                    directoryIds = sessions.map { it.sessionId },
+                    pendingCreateSessionId = pendingCreateId,
+                )
+                selectedSessionId = keepId
+                val selected = sessions.find { it.sessionId == keepId }
                 val workspace = synchronized(cacheLock) { cachedWorkspace }
-                val cached = workspace?.projection(selected?.sessionId)
+                val cached = workspace?.projection(keepId)
                 val resume = resumePlanFor(
                     cachedHostInstanceId = workspace?.hostInstanceId,
                     connectedHostInstanceId = hello.hostInstanceId,
-                    sessionId = selected?.sessionId,
+                    sessionId = keepId,
                     projection = cached,
                     expectedProjectionVersion = PROJECTION_VERSION,
                 )
-                val reading = selected?.sessionId?.let { workspace?.readingPositions?.get(it) }
+                val reading = keepId?.let { workspace?.readingPositions?.get(it) }
                 val anchorUnavailable = reading?.anchorEntryId != null &&
                     cached?.timeline?.none { it.id == reading.anchorEntryId } == true
                 update(ConnectionPhase.HELLO, "Hello accepted by ${hello.hostInstanceId}.") {
@@ -1222,12 +1412,13 @@ class Gate0CClient(
                         grantedCapabilities = granted,
                         controlLease = synchronized(commandLock) { activeControl?.toStatus() },
                         sessions = sessions,
+                        workspaces = workspaces,
                         agentPresets = presets,
                         modelCatalog = catalog,
                         modelCatalogFailures = catalogFailures,
                         artifacts = artifacts,
                         attachmentLimits = attachmentLimits,
-                        sessionId = selected?.sessionId,
+                        sessionId = keepId,
                         sessionTitle = cached?.title ?: selected?.title,
                         sessionRunning = cached?.running ?: selected?.running,
                         sessionUsage = cached?.usage ?: selected?.usage,
@@ -1246,7 +1437,7 @@ class Gate0CClient(
                         offlineSnapshot = cached != null,
                         offlineCacheSavedAtMs = cached?.savedAtMs ?: workspace?.savedAtMs,
                         offlineCacheTruncated = cached?.cacheTruncated ?: false,
-                        localDraft = selected?.sessionId?.let { workspace?.drafts?.get(it) }.orEmpty(),
+                        localDraft = keepId?.let { workspace?.drafts?.get(it) }.orEmpty(),
                         readingAnchorId = when {
                             anchorUnavailable -> cached.timeline.firstOrNull()?.id
                             else -> reading?.anchorEntryId
@@ -1260,8 +1451,8 @@ class Gate0CClient(
                 // S-blob: an interrupted upload survives in the encrypted
                 // journal; surface it so the user resumes or abandons explicitly.
                 refreshStagedUpload()
-                if (selected != null) {
-                    if (resume == null) {
+                if (keepId != null) {
+                    if (selected == null || resume == null) {
                         subscribeFresh("Negotiating a fresh projection snapshot.")
                     } else {
                         subscribeResume(resume, "Negotiating retained events after cursor ${resume.sequence}.")
@@ -1301,6 +1492,11 @@ class Gate0CClient(
                     errorCode = result.errorCode.name,
                     detail = result.detail,
                 )
+                Log.i(
+                    LOG_TAG,
+                    "command_result id=${result.commandId} outcome=$outcome " +
+                        "replayed=${result.replayed} error=${result.errorCode.name}",
+                )
                 update(log = "Command ${outcome.lowercase()}${if (result.replayed) " · replayed" else ""}.") {
                     copy(
                         commandReceipts = CommandReceiptReducer.upsert(commandReceipts, receipt),
@@ -1331,31 +1527,40 @@ class Gate0CClient(
             ServerFrame.PayloadCase.CONTROL_RESULT -> {
                 val result = frame.controlResult
                 val outcome = result.outcome.name.removePrefix("CONTROL_OUTCOME_")
+                val heldByOther = result.errorCode == ErrorCode.ERROR_CODE_CONTROL_HELD_BY_OTHER
+                val granted = (outcome == "ACQUIRED" || outcome == "RENEWED") && result.hasControl()
+                val discardGrant = granted && releaseWhenGranted && !controlRetention
                 synchronized(commandLock) {
-                    activeControl = when (outcome) {
-                        "ACQUIRED", "RENEWED" -> if (result.hasControl()) {
-                            ActiveControl(
-                                sessionId = result.sessionId,
-                                epoch = result.control.epoch,
-                                token = result.control.token,
-                                expiresAtMs = result.expiresAtMs,
-                            )
-                        } else {
-                            null
-                        }
-                        "RELEASED" -> null
-                        else -> activeControl?.takeUnless {
-                            result.errorCode in setOf(
-                                ErrorCode.ERROR_CODE_CONTROL_EXPIRED,
-                                ErrorCode.ERROR_CODE_CONTROL_STALE_FENCE,
-                                ErrorCode.ERROR_CODE_CONTROL_UNHELD,
-                                ErrorCode.ERROR_CODE_AUTHORIZATION_DENIED,
-                            )
-                        }
+                    activeControl = when {
+                        granted -> ActiveControl(
+                            sessionId = result.sessionId,
+                            epoch = result.control.epoch,
+                            token = result.control.token,
+                            expiresAtMs = result.expiresAtMs,
+                        )
+                        outcome == "RELEASED" || heldByOther -> null
+                        outcome == "REJECTED" && result.errorCode in setOf(
+                            ErrorCode.ERROR_CODE_CONTROL_EXPIRED,
+                            ErrorCode.ERROR_CODE_CONTROL_STALE_FENCE,
+                            ErrorCode.ERROR_CODE_CONTROL_UNHELD,
+                            ErrorCode.ERROR_CODE_AUTHORIZATION_DENIED,
+                            ErrorCode.ERROR_CODE_CONTROL_HELD_BY_OTHER,
+                        ) -> null
+                        else -> activeControl
                     }
+                    controlOpInFlight = false
+                    completeControlWaiters(granted && !discardGrant)
                 }
                 update(log = "Control ${outcome.lowercase()} · ${result.errorCode.name}.") {
-                    copy(controlLease = synchronized(commandLock) { activeControl?.toStatus() })
+                    copy(
+                        controlLease = synchronized(commandLock) { activeControl?.toStatus() },
+                        controlHeldByOther = heldByOther,
+                    )
+                }
+                if (discardGrant) {
+                    releaseHeldControl()
+                } else if (granted && controlRetention) {
+                    scheduleControlRenew()
                 }
             }
 
@@ -1988,6 +2193,8 @@ class Gate0CClient(
             PendingCommandOperation.CREATE_SESSION -> commandBuilder.setCreateSession(
                 CreateSession.newBuilder().apply {
                     command.agentPreset?.let(::setAgentPreset)
+                    command.workspaceId?.let(::setWorkspaceId)
+                    command.newWorkspaceName?.let(::setNewWorkspaceName)
                 },
             )
             PendingCommandOperation.SELECT_AGENT_PRESET -> commandBuilder.setSelectAgentPreset(
@@ -2085,6 +2292,8 @@ class Gate0CClient(
                         activeControl = null
                     }
                 }
+                val heldByOther = receipt.outcome == "REJECTED" &&
+                    receipt.errorCode.contains("HELD_BY_OTHER")
                 if (
                     receipt.outcome == "COMMITTED" &&
                     current.operation == PendingCommandOperation.SEND_INPUT &&
@@ -2164,6 +2373,7 @@ class Gate0CClient(
                     state.copy(
                         pendingCommand = if (cleared.isSuccess) null else current.toStatus(),
                         controlLease = synchronized(commandLock) { activeControl?.toStatus() },
+                        controlHeldByOther = heldByOther,
                         commandRecoveryBlocked = cleared.isFailure,
                         commandWarning = cleared.exceptionOrNull()?.let {
                             "Terminal receipt arrived, but protected command cleanup failed; sending remains blocked until explicit re-pairing."
@@ -2521,6 +2731,7 @@ class Gate0CClient(
                         )
                     }
                     update(log = "Staged an image for the next send.")
+                    prepareControl()
                 }
             }
         }
@@ -3024,6 +3235,7 @@ class Gate0CClient(
 
     fun startNewPairingCeremony() {
         connectionEpoch.incrementAndGet()
+        dropControl(releaseRemote = true)
         closeTransport()
         cacheWriteJob?.cancel()
         cacheWriteJob = null
@@ -3246,6 +3458,7 @@ class Gate0CClient(
         const val CACHE_WRITE_DEBOUNCE_MS = 400L
         const val UNLOCK_POLL_INTERVAL_MS = 2_000L
         const val UNLOCK_POLL_ATTEMPTS = 6
+        const val CONTROL_PREPARE_TIMEOUT_MS = 8_000L
         val RECOVERY_RETRY_DELAYS_MS = longArrayOf(0, 250, 750, 1_500, 3_000)
     }
 }

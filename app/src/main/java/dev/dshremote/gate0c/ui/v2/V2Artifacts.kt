@@ -1,6 +1,7 @@
 package dev.dshremote.gate0c.ui.v2
 
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -363,6 +364,7 @@ internal fun V2ArtifactViewer(
     // S-blob：截断产物的完整内容抓取。三态如实：抓取中 / 不可用（可重试
     // 与否）/ 已核验全文。核验后的全文单独成视图，不回填 hunk 列表。
     var fullFetch by remember(artifact.artifactId) { mutableStateOf<FullFetch>(FullFetch.Idle) }
+    BackHandler(onBack = onClose)
     val startFetch = {
         fullFetch = FullFetch.Fetching
         scope.launch {

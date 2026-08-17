@@ -23,6 +23,15 @@ class PairedHostRecordTest {
     }
 
     @Test
+    fun hostDirectoryIgnoresSiblingJournalFiles() {
+        val hostId = "6f664c64c37e3d4ede5b8331ba16d60f9ac1463ecffb38ae43b20165a94eb7ea"
+        assertEquals(true, PairedHostStore.isRecordFileName("$hostId.bin"))
+        assertEquals(false, PairedHostStore.isRecordFileName("pending-command-$hostId.bin"))
+        assertEquals(false, PairedHostStore.isRecordFileName("blob-upload-journal-$hostId.bin"))
+        assertEquals(false, PairedHostStore.isRecordFileName("paired-host.bin"))
+    }
+
+    @Test
     fun rejectsMasksOutsideTheClosedSet() {
         assertThrows(IllegalArgumentException::class.java) { record(0) }
         assertThrows(IllegalArgumentException::class.java) { record(7) }

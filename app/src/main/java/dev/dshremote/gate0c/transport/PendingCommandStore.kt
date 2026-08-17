@@ -55,6 +55,8 @@ internal data class PendingRemoteCommand(
     val approvalRevision: String?,
     val approvalDecision: PendingApprovalDecision?,
     val agentPreset: String?,
+    val workspaceId: String? = null,
+    val newWorkspaceName: String? = null,
     val modelSelection: ModelSelectionProjection?,
     val childSessionId: String?,
     val forkAtSeq: Long?,
@@ -121,6 +123,9 @@ internal data class PendingRemoteCommand(
                 require(text == null && expectedActivityRevision == null)
                 require(approvalId == null && approvalRevision == null && approvalDecision == null)
                 require(agentPreset == null || agentPreset.matches(ASCII_IDENTIFIER))
+                require(workspaceId == null || workspaceId.matches(ASCII_IDENTIFIER))
+                require(newWorkspaceName == null || RemoteWorkspaceName.sanitize(newWorkspaceName) == newWorkspaceName)
+                require(newWorkspaceName == null || workspaceId != null)
                 require(modelSelection == null && childSessionId == null && forkAtSeq == null)
                 requireLeaseFree()
             }
@@ -128,6 +133,7 @@ internal data class PendingRemoteCommand(
                 require(text == null && expectedActivityRevision == null)
                 require(approvalId == null && approvalRevision == null && approvalDecision == null)
                 require(agentPreset != null && agentPreset.matches(ASCII_IDENTIFIER))
+                require(workspaceId == null && newWorkspaceName == null)
                 require(modelSelection == null && childSessionId == null && forkAtSeq == null)
                 requireLeaseFree()
             }
@@ -137,6 +143,7 @@ internal data class PendingRemoteCommand(
                 require(text == null && expectedActivityRevision == null)
                 require(approvalId == null && approvalRevision == null && approvalDecision == null)
                 require(agentPreset == null && childSessionId == null && forkAtSeq == null)
+                require(workspaceId == null && newWorkspaceName == null)
                 requireValidModelSelection()
                 requireValidControl()
             }
@@ -146,6 +153,7 @@ internal data class PendingRemoteCommand(
                 require(text == null && expectedActivityRevision == null)
                 require(approvalId == null && approvalRevision == null && approvalDecision == null)
                 require(agentPreset == null && modelSelection == null)
+                require(workspaceId == null && newWorkspaceName == null)
                 require(
                     !childSessionId.isNullOrBlank() &&
                         childSessionId.encodeToByteArray().size <= MAX_ID_BYTES,
@@ -186,6 +194,8 @@ internal data class PendingRemoteCommand(
                     approvalRevision = approvalRevision,
                     approvalDecision = approvalDecision,
                     agentPreset = agentPreset,
+                    workspaceId = workspaceId,
+                    newWorkspaceName = newWorkspaceName,
                     modelSelection = modelSelection,
                     childSessionId = childSessionId,
                     forkAtSeq = forkAtSeq,
@@ -221,6 +231,7 @@ internal data class PendingRemoteCommand(
 
     private fun requireNoSessionAdmin() {
         require(agentPreset == null && modelSelection == null)
+        require(workspaceId == null && newWorkspaceName == null)
         require(childSessionId == null && forkAtSeq == null)
     }
 
@@ -437,6 +448,8 @@ internal data class PendingRemoteCommand(
             sessionId: String,
             agentPreset: String?,
             createdAtMs: Long,
+            workspaceId: String? = null,
+            newWorkspaceName: String? = null,
         ): PendingRemoteCommand = PendingRemoteCommand(
             authorityBinding = authorityBinding.copyOf(),
             pairedAtMs = pairedAtMs,
@@ -449,6 +462,8 @@ internal data class PendingRemoteCommand(
             approvalRevision = null,
             approvalDecision = null,
             agentPreset = agentPreset,
+            workspaceId = workspaceId,
+            newWorkspaceName = newWorkspaceName,
             modelSelection = null,
             childSessionId = null,
             forkAtSeq = null,
@@ -469,6 +484,8 @@ internal data class PendingRemoteCommand(
                 approvalRevision = null,
                 approvalDecision = null,
                 agentPreset = agentPreset,
+                workspaceId = workspaceId,
+                newWorkspaceName = newWorkspaceName,
                 modelSelection = null,
                 childSessionId = null,
                 forkAtSeq = null,
@@ -747,6 +764,8 @@ internal data class PendingRemoteCommand(
             approvalRevision: String?,
             approvalDecision: PendingApprovalDecision?,
             agentPreset: String?,
+            workspaceId: String? = null,
+            newWorkspaceName: String? = null,
             modelSelection: ModelSelectionProjection?,
             childSessionId: String?,
             forkAtSeq: Long?,
@@ -778,6 +797,10 @@ internal data class PendingRemoteCommand(
                         PendingCommandOperation.CREATE_SESSION -> {
                             data.writeBoolean(agentPreset != null)
                             agentPreset?.let(data::writeBoundedString)
+                            data.writeBoolean(workspaceId != null)
+                            workspaceId?.let(data::writeBoundedString)
+                            data.writeBoolean(newWorkspaceName != null)
+                            newWorkspaceName?.let(data::writeBoundedString)
                         }
                         PendingCommandOperation.SELECT_AGENT_PRESET ->
                             data.writeBoundedString(requireNotNull(agentPreset))
@@ -813,7 +836,8 @@ internal data class PendingRemoteCommand(
         // v6: send_input may carry committed S-blob attachment ids.
         // v7: S-policy — revoke_approval_rule / set_session_budget operations
         //     and the ALLOW_SAME_KIND approval decision.
-        internal const val FORMAT_VERSION = 7
+        // v8: create_session may bind workspaceId / newWorkspaceName.
+        internal const val FORMAT_VERSION = 8
     }
 }
 
@@ -848,6 +872,10 @@ internal object PendingCommandCodec {
                 PendingCommandOperation.CREATE_SESSION -> {
                     data.writeBoolean(command.agentPreset != null)
                     command.agentPreset?.let(data::writeBoundedString)
+                    data.writeBoolean(command.workspaceId != null)
+                    command.workspaceId?.let(data::writeBoundedString)
+                    data.writeBoolean(command.newWorkspaceName != null)
+                    command.newWorkspaceName?.let(data::writeBoundedString)
                 }
                 PendingCommandOperation.SELECT_AGENT_PRESET ->
                     data.writeBoundedString(requireNotNull(command.agentPreset))
@@ -899,6 +927,8 @@ internal object PendingCommandCodec {
         val attachmentIds: List<String>?
         var ruleId: String? = null
         var maxTotalTokens: Long? = null
+        var workspaceId: String? = null
+        var newWorkspaceName: String? = null
         if (version == 1) {
             operation = PendingCommandOperation.SEND_INPUT
             text = data.readBoundedString(PendingRemoteCommand.MAX_TEXT_CHARS)
@@ -964,6 +994,10 @@ internal object PendingCommandCodec {
                     approvalRevision = null
                     approvalDecision = null
                     agentPreset = if (data.readBoolean()) data.readBoundedString() else null
+                    if (version >= 8) {
+                        workspaceId = if (data.readBoolean()) data.readBoundedString() else null
+                        newWorkspaceName = if (data.readBoolean()) data.readBoundedString() else null
+                    }
                     modelSelection = null
                     childSessionId = null
                     forkAtSeq = null
@@ -1068,6 +1102,7 @@ internal object PendingCommandCodec {
                     )
                     PendingCommandOperation.CREATE_SESSION -> PendingRemoteCommand.createSession(
                         binding, pairedAtMs, commandId, sessionId, agentPreset, createdAtMs,
+                        workspaceId, newWorkspaceName,
                     )
                     PendingCommandOperation.SELECT_AGENT_PRESET -> PendingRemoteCommand.createSelectAgentPreset(
                         binding, pairedAtMs, commandId, sessionId, requireNotNull(agentPreset), createdAtMs,
@@ -1102,6 +1137,8 @@ internal object PendingCommandCodec {
                     approvalRevision = approvalRevision,
                     approvalDecision = approvalDecision,
                     agentPreset = agentPreset,
+                    workspaceId = workspaceId,
+                    newWorkspaceName = newWorkspaceName,
                     modelSelection = modelSelection,
                     childSessionId = childSessionId,
                     forkAtSeq = forkAtSeq,

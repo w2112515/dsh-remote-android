@@ -29,6 +29,7 @@
         android:theme="@style/Theme.DSHRemote">
         <activity
             android:name=".MainActivity"
+            android:enableOnBackInvokedCallback="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

@@ -53,7 +53,7 @@ class ArtifactPresentationInstrumentedTest {
     fun derivesIconFamilyFromExtensionOnly() {
         assertEquals(V2ArtifactKind.DIFF, artifactKindOf("fix-auth-race.diff"))
         assertEquals(V2ArtifactKind.DIFF, artifactKindOf("patches/0001.patch"))
-        assertEquals(V2ArtifactKind.MD, artifactKindOf("docs/REVIEW.md"))
+        assertEquals(V2ArtifactKind.DOC, artifactKindOf("docs/REVIEW.md"))
         assertEquals(V2ArtifactKind.LOG, artifactKindOf("build/output.log"))
         assertEquals(V2ArtifactKind.CODE, artifactKindOf("src/session-refresh.ts"))
         assertEquals(V2ArtifactKind.CODE, artifactKindOf("no-extension"))

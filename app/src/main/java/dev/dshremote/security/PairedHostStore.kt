@@ -112,7 +112,7 @@ class PairedHostStore(context: Context) {
     @Synchronized
     fun list(): List<PairedHostRecord> {
         migrateLegacyRecord()
-        val files = hostsDir.listFiles { file -> file.extension == "bin" } ?: return emptyList()
+        val files = hostsDir.listFiles { file -> isRecordFileName(file.name) } ?: return emptyList()
         return files.sortedBy { it.name }.map { file ->
             val hostId = file.nameWithoutExtension
             require(hostId.matches(HOST_ID_PATTERN)) { "Invalid paired Host file name" }
@@ -440,6 +440,16 @@ class PairedHostStore(context: Context) {
         private val CONFIRMED_AAD = "dsh-remote/paired-host/v1".encodeToByteArray()
         private val PENDING_AAD = "dsh-remote/pending-host-recovery/v1".encodeToByteArray()
         private val HOST_ID_PATTERN = Regex("[0-9a-f]{64}")
+
+        /**
+         * Only the 64-hex Host pin files. Sibling journals in the same
+         * directory (`pending-command-…`, `blob-upload-journal-…`) must not
+         * be read as pins — that fails closed as "cannot authenticate".
+         */
+        internal fun isRecordFileName(name: String): Boolean {
+            if (!name.endsWith(".bin")) return false
+            return name.removeSuffix(".bin").matches(HOST_ID_PATTERN)
+        }
 
         /** Lowercase SHA-256 hex of one Host public key — the file-safe Host key. */
         fun hostIdOfKey(hostPublicKey: ByteArray): String {

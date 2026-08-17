@@ -1,5 +1,6 @@
 package dev.dshremote.gate0c.ui.v2
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -41,6 +42,7 @@ internal fun V2ToolDetail(entry: TimelineEntry, onBack: () -> Unit) {
     val v2 = LocalV2.current
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
+    BackHandler(onBack = onBack)
     Column(
         Modifier
             .fillMaxSize()

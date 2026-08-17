@@ -1,7 +1,9 @@
 package dev.dshremote.gate0c.transport
 
 import android.content.Context
+import dev.dshremote.security.DeviceIdentityStore
 import dev.dshremote.security.PairedHostStore
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -112,6 +114,35 @@ class HostFleet(context: Context) {
 
     fun reconnectAll() {
         synchronized(lock) { clients.values.forEach { it.connect() } }
+    }
+
+    /**
+     * Fleet-level new-pairing reset when the registry itself cannot be read.
+     * Same local wipe as a confirmed Host-sheet 解除配对 / 重新配对: pins,
+     * device identity, offline caches and pending-command journals. Host-side
+     * authorization is not revoked.
+     */
+    fun resetLocalAuthority() {
+        synchronized(lock) {
+            observers.values.forEach { it.cancel() }
+            observers.clear()
+            clients.values.forEach { it.close() }
+            clients.clear()
+            supervisorObservers.values.forEach { it.cancel() }
+            supervisorObservers.clear()
+            supervisors.values.forEach { it.close() }
+            supervisors.clear()
+            mutableSupervisorViews.value = emptyMap()
+        }
+        pairedHostStore.delete()
+        DeviceIdentityStore(appContext).delete()
+        OfflineProjectionStore(appContext).clear()
+        PendingCommandStore(appContext).clear()
+        BlobUploadStore(appContext).clear()
+        File(appContext.noBackupFilesDir, "cache/hosts").listFiles()?.forEach { it.delete() }
+        File(appContext.cacheDir, "blob-uploads").listFiles()?.forEach { it.delete() }
+        File(appContext.cacheDir, "blob-cache").listFiles()?.forEach { it.delete() }
+        publishAll()
     }
 
     fun close() {

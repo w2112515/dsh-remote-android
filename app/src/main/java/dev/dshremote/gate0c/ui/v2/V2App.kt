@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import android.util.Log
@@ -63,7 +64,7 @@ internal data class V2Callbacks(
     val onOpenSession: (String) -> Unit,
     val onReconnect: () -> Unit,
     val onProbe: () -> Unit,
-    val onAcquireControl: () -> Unit,
+    val onRetainControl: (Boolean) -> Unit,
     val onSend: () -> Unit,
     val onStop: () -> Unit,
     val onApprovalDecision: (String, PendingApprovalDecision) -> Unit,
@@ -74,7 +75,7 @@ internal data class V2Callbacks(
     val onReadingPositionChanged: (String?, Int, Boolean) -> Unit,
     // S-mode-select: returns the preallocated Session id when the creation was
     // durably queued, null when gated (phase/capability/pending command).
-    val onCreateSession: (String?) -> String?,
+    val onCreateSession: (CreateSessionChoice) -> String?,
     val onSelectAgentPreset: (String) -> Unit,
     // S-session-admin: model triple for the open session's subsequent requests.
     val onSelectModel: (String, String, String?) -> Unit,
@@ -198,18 +199,31 @@ internal fun V2App(
     // S-mode-select: creation queues the durable command and returns the
     // preallocated id; the COMMITTED receipt subscribes it Host-side, and the
     // chat opens on the id at once (blank until the snapshot lands).
-    val createSession: (String, String?) -> Unit = create@{ hostId, preset ->
+    val context = LocalContext.current
+    val createSession: (String, CreateSessionChoice) -> Unit = create@{ hostId, choice ->
         val face = hosts.firstOrNull { it.hostId == hostId } ?: return@create
-        val newId = face.callbacks.onCreateSession(preset)
+        val newId = face.callbacks.onCreateSession(choice)
         if (newId != null) {
+            choice.workspaceId?.let { rememberWorkspaceId(context, hostId, it) }
             chatHostId = hostId
             chatSessionId = newId
         }
     }
-    // P7 H11/H12：新建入口 = 头部圆形 +（原型流程：直建默认组合的空白会话，
-    // 模式在首轮前由 composer 模式 chip 更换）。多台可创建 Host 时先选主机。
+    // 新建：多 Host 先选主机，再选已有项目或在名册父级下新建文件夹。
     val createEligible = hosts.filter { createAuthorized(it.state) }
     var createHostSheetOpen by rememberSaveable { mutableStateOf(false) }
+    var createProjectHostId by rememberSaveable { mutableStateOf<String?>(null) }
+    var createParentPickOpen by rememberSaveable { mutableStateOf(false) }
+    var createNameParentId by rememberSaveable { mutableStateOf<String?>(null) }
+    val beginCreateOnHost: (String) -> Unit = begin@{ hostId ->
+        val face = hosts.firstOrNull { it.hostId == hostId } ?: return@begin
+        val roster = face.state.workspaces
+        if (roster.isEmpty()) {
+            createSession(hostId, CreateSessionChoice())
+            return@begin
+        }
+        createProjectHostId = hostId
+    }
     if (createHostSheetOpen) {
         V2Sheet(
             title = "新建会话 · 选择主机",
@@ -223,14 +237,63 @@ internal fun V2App(
                     selected = false,
                     onClick = {
                         createHostSheetOpen = false
-                        createSession(face.hostId, null)
+                        beginCreateOnHost(face.hostId)
                     },
                 )
             }
         }
     }
+    val createProjectFace = hosts.firstOrNull { it.hostId == createProjectHostId }
+    if (createProjectFace != null && createNameParentId == null && !createParentPickOpen) {
+        V2CreateProjectSheet(
+            workspaces = createProjectFace.state.workspaces,
+            lastWorkspaceId = lastWorkspaceId(context, createProjectFace.hostId),
+            onPickExisting = { workspace ->
+                createProjectHostId = null
+                createSession(
+                    createProjectFace.hostId,
+                    CreateSessionChoice(workspaceId = workspace.workspaceId),
+                )
+            },
+            onStartNew = {
+                val roster = createProjectFace.state.workspaces
+                if (roster.size == 1) {
+                    createNameParentId = roster.single().workspaceId
+                } else {
+                    createParentPickOpen = true
+                }
+            },
+            onDismiss = { createProjectHostId = null },
+        )
+    }
+    if (createParentPickOpen && createProjectFace != null) {
+        V2CreateProjectParentSheet(
+            workspaces = createProjectFace.state.workspaces,
+            onPick = { workspace ->
+                createParentPickOpen = false
+                createNameParentId = workspace.workspaceId
+            },
+            onDismiss = { createParentPickOpen = false },
+        )
+    }
+    val nameParent = createProjectFace?.state?.workspaces?.firstOrNull { it.workspaceId == createNameParentId }
+    if (createProjectFace != null && nameParent != null) {
+        V2CreateProjectNameSheet(
+            parent = nameParent,
+            onConfirm = { name ->
+                val hostId = createProjectFace.hostId
+                createNameParentId = null
+                createProjectHostId = null
+                createSession(
+                    hostId,
+                    CreateSessionChoice(workspaceId = nameParent.workspaceId, newWorkspaceName = name),
+                )
+            },
+            onDismiss = { createNameParentId = null },
+        )
+    }
     val startCreate: (() -> Unit)? = when {
-        createEligible.size == 1 -> ({ createSession(createEligible.single().hostId, null) })
+        createEligible.size == 1 -> ({ beginCreateOnHost(createEligible.single().hostId) })
         createEligible.isNotEmpty() -> ({ createHostSheetOpen = true })
         else -> null
     }
@@ -314,7 +377,7 @@ internal fun V2App(
             },
             onReconnect = chatFace.callbacks.onReconnect,
             onProbe = chatFace.callbacks.onProbe,
-            onAcquireControl = chatFace.callbacks.onAcquireControl,
+            onRetainControl = chatFace.callbacks.onRetainControl,
             onSend = chatFace.callbacks.onSend,
             onStop = chatFace.callbacks.onStop,
             onApprovalDecision = chatFace.callbacks.onApprovalDecision,

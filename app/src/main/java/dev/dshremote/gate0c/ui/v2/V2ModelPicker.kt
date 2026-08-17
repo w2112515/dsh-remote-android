@@ -33,7 +33,7 @@ import dev.dshremote.gate0c.transport.ModelEntryProjection
 import dev.dshremote.gate0c.transport.ModelProviderGroupProjection
 import dev.dshremote.gate0c.transport.ModelSelectionProjection
 import dev.dshremote.gate0c.transport.PendingCommandOperation
-import dev.dshremote.gate0c.transport.hasCapabilities
+import dev.dshremote.gate0c.transport.PendingCommandProgress
 import dev.dshremote.gate0c.transport.modelDisplayLabel
 
 /**
@@ -231,7 +231,7 @@ private fun V2EffortChip(
 
 /**
  * Composer 模型 chip（原型 model-chip 的真实现）。显示当前会话的模型三元组；
- * 取得会话控制后可点开目录选择。Host 目录为空且当前会话无记录时整条不渲染
+ * 点选后由客户端静默准备写权限。Host 目录为空且当前会话无记录时整条不渲染
  * ——没有可选择的对象。目录缺失从不用部署默认值冒充。
  */
 @Composable
@@ -243,17 +243,12 @@ internal fun V2ModelChip(
     val catalog = state.modelCatalog
     val current = state.sessionModel
     if (catalog.isEmpty() && current == null) return
-    val pendingSelect = state.pendingCommand?.operation == PendingCommandOperation.SELECT_MODEL
-    val leaseUsable = state.controlLease?.let { lease ->
-        lease.sessionId == state.sessionId && lease.isUsable()
-    } == true
-    // select_model 与 send_input 一样需要会话控制栅栏（会话中可切换）。
-    val selectable = state.isReady() &&
-        !state.isStaleView() &&
-        state.pendingCommand == null &&
-        leaseUsable &&
-        hasCapabilities(state.grantedCapabilities, 68uL) &&
-        catalog.isNotEmpty()
+    val pending = state.pendingCommand
+    val pendingSelect = pending?.operation == PendingCommandOperation.SELECT_MODEL
+    val pendingUnknown = pending != null &&
+        pending.operation == PendingCommandOperation.SELECT_MODEL &&
+        pending.progress == PendingCommandProgress.UNKNOWN
+    val selectable = composerPrimary(state).modelSelectable
     var pickerOpen by remember { mutableStateOf(false) }
     if (pickerOpen) {
         V2ModelPickerDialog(
@@ -287,6 +282,7 @@ internal fun V2ModelChip(
         )
         Text(
             when {
+                pendingUnknown -> "切换未确认"
                 pendingSelect -> "模型切换中…"
                 current != null -> modelDisplayLabel(catalog, current)
                 catalog.isNotEmpty() -> "选择模型"

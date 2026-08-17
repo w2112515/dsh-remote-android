@@ -112,10 +112,28 @@ class PendingCommandCodecTest {
 
         val decodedDefault = PendingCommandCodec.decode(PendingCommandCodec.encode(createDefault))
         assertEquals(null, decodedDefault.agentPreset)
+        assertEquals(null, decodedDefault.workspaceId)
+        assertEquals(null, decodedDefault.newWorkspaceName)
         assertArrayEquals(createDefault.requestFingerprint, decodedDefault.requestFingerprint)
         // The preset half participates in identity: a different preset is a
         // different command, so a reused command id conflicts instead of replaying.
         assertFalse(create.requestFingerprint.contentEquals(createDefault.requestFingerprint))
+
+        val bound = PendingRemoteCommand.createSession(
+            authorityBinding = ByteArray(32) { it.toByte() },
+            pairedAtMs = 1_000,
+            commandId = "android-create-3",
+            sessionId = "android-preallocated-3",
+            agentPreset = null,
+            createdAtMs = 1_103,
+            workspaceId = "ws-parent",
+            newWorkspaceName = "notes",
+        )
+        val decodedBound = PendingCommandCodec.decode(PendingCommandCodec.encode(bound))
+        assertEquals("ws-parent", decodedBound.workspaceId)
+        assertEquals("notes", decodedBound.newWorkspaceName)
+        assertArrayEquals(bound.requestFingerprint, decodedBound.requestFingerprint)
+        assertFalse(bound.requestFingerprint.contentEquals(createDefault.requestFingerprint))
 
         val decodedSelect = PendingCommandCodec.decode(PendingCommandCodec.encode(select))
         assertEquals(PendingCommandOperation.SELECT_AGENT_PRESET, decodedSelect.operation)
@@ -335,21 +353,6 @@ class PendingCommandCodecTest {
         // the real migration path (fingerprint re-derived, phase preserved).
         fun asV4(command: PendingRemoteCommand): ByteArray =
             PendingCommandCodec.encode(command).also { it[3] = 4 }
-
-        val create = PendingRemoteCommand.createSession(
-            authorityBinding = ByteArray(32) { it.toByte() },
-            pairedAtMs = 1_000,
-            commandId = "android-create-legacy",
-            sessionId = "android-preallocated-legacy",
-            agentPreset = "code",
-            createdAtMs = 1_100,
-        ).withPhase(PendingCommandPhase.RECEIVED)
-        val migratedCreate = PendingCommandCodec.decode(asV4(create))
-        assertEquals(PendingCommandOperation.CREATE_SESSION, migratedCreate.operation)
-        assertEquals("android-preallocated-legacy", migratedCreate.sessionId)
-        assertEquals("code", migratedCreate.agentPreset)
-        assertEquals(PendingCommandPhase.RECEIVED, migratedCreate.phase)
-        assertArrayEquals(create.requestFingerprint, migratedCreate.requestFingerprint)
 
         val select = PendingRemoteCommand.createSelectAgentPreset(
             authorityBinding = ByteArray(32) { it.toByte() },

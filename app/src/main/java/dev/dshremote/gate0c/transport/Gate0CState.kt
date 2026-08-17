@@ -481,6 +481,12 @@ data class SessionDirectoryEntry(
         get() = origin == "subagent"
 }
 
+/** Hello workspace roster row: Host id + label. Paths never cross. */
+data class WorkspaceProjection(
+    val workspaceId: String,
+    val label: String,
+)
+
 /**
  * One Agent preset the Host deployment can compose a session from
  * (S-mode-select). The roster rides ServerHello as a connect-time snapshot;
@@ -932,6 +938,7 @@ data class Gate0CState(
     val connectionId: String? = null,
     val grantedCapabilities: ULong = 0u,
     val sessions: List<SessionDirectoryEntry> = emptyList(),
+    val workspaces: List<WorkspaceProjection> = emptyList(),
     val agentPresets: List<AgentPresetProjection> = emptyList(),
     val modelCatalog: List<ModelProviderGroupProjection> = emptyList(),
     val modelCatalogFailures: List<ModelCatalogFailureProjection> = emptyList(),
@@ -972,6 +979,8 @@ data class Gate0CState(
     val commandReceipts: List<CommandReceipt> = emptyList(),
     val pendingCommand: PendingCommandStatus? = null,
     val controlLease: ControlLeaseStatus? = null,
+    /** Another writer (usually the Host Web) currently holds this session. */
+    val controlHeldByOther: Boolean = false,
     val commandWarning: String? = null,
     val commandRecoveryBlocked: Boolean = false,
     val events: List<String> = listOf("Waiting for the Android lifecycle to start the carrier."),

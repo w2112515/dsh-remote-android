@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -45,14 +46,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -103,7 +109,7 @@ internal fun V2ChatView(
     onBack: () -> Unit,
     onReconnect: () -> Unit,
     onProbe: () -> Unit,
-    onAcquireControl: () -> Unit,
+    onRetainControl: (Boolean) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onApprovalDecision: (String, PendingApprovalDecision) -> Unit,
@@ -132,6 +138,23 @@ internal fun V2ChatView(
     hostLabel: String? = null,
 ) {
     val v2 = LocalV2.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val retainControl = rememberUpdatedState(onRetainControl)
+    DisposableEffect(lifecycleOwner, state.sessionId) {
+        retainControl.value(true)
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> retainControl.value(true)
+                Lifecycle.Event.ON_STOP -> retainControl.value(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            retainControl.value(false)
+        }
+    }
     var view by rememberSaveable { mutableStateOf(ChatView.CHAT.name) }
     var trajFilter by rememberSaveable { mutableStateOf(TrajFilter.ALL.name) }
     var selectedToolId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -139,6 +162,23 @@ internal fun V2ChatView(
     var exportCopied by remember { mutableStateOf(false) }
     var policySheet by rememberSaveable { mutableStateOf(false) }
     val selectedTool = state.timeline.find { it.id == selectedToolId }
+    BackHandler {
+        when (
+            v2SystemBackAction(
+                artifactOpen = false,
+                toolDetailOpen = selectedTool != null,
+                replayOpen = replaying && state.timeline.isNotEmpty(),
+                chatOpen = true,
+            )
+        ) {
+            V2SystemBackAction.CLOSE_TOOL_DETAIL -> selectedToolId = null
+            V2SystemBackAction.CLOSE_REPLAY -> replaying = false
+            V2SystemBackAction.LEAVE_CHAT,
+            V2SystemBackAction.CLOSE_ARTIFACT,
+            V2SystemBackAction.FINISH,
+            -> onBack()
+        }
+    }
     val voice = if (voiceEnabled) {
         rememberVoiceInput { text ->
             onDraftChanged(
@@ -351,7 +391,6 @@ internal fun V2ChatView(
             state = state,
             voice = voice,
             onDraftChanged = onDraftChanged,
-            onAcquireControl = onAcquireControl,
             onSend = onSend,
             onStop = onStop,
             onReconcile = onReconcile,
@@ -1318,6 +1357,7 @@ private fun V2ReplayView(
         }
     }
     val entry = timeline[safeIndex]
+    BackHandler(onBack = onExit)
     Column(
         Modifier
             .fillMaxSize()
@@ -1398,7 +1438,6 @@ private fun V2Composer(
     state: Gate0CState,
     voice: VoiceInputController?,
     onDraftChanged: (String) -> Unit,
-    onAcquireControl: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onReconcile: () -> Unit,
@@ -1419,100 +1458,18 @@ private fun V2Composer(
     val writeAuthorized = hasCapabilities(state.grantedCapabilities, 68uL)
     val stopAuthorized = hasCapabilities(state.grantedCapabilities, 72uL)
     val pending = state.pendingCommand
-    val leaseUsable = state.controlLease?.let { lease ->
-        lease.sessionId == state.sessionId && lease.isUsable()
-    } == true
-
-    val actionLabel: String
-    val actionEnabled: Boolean
-    val action: () -> Unit
-    when {
-        state.commandRecoveryBlocked -> {
-            actionLabel = "修复受阻"
-            actionEnabled = false
-            action = {}
-        }
-        pending != null -> {
-            actionLabel = when {
-                pending.progress == PendingCommandProgress.UNKNOWN -> "对账"
-                pending.operation == PendingCommandOperation.STOP -> "查看 Stop"
-                pending.operation == PendingCommandOperation.DECIDE_APPROVAL -> "查看审批"
-                else -> "查看状态"
-            }
-            actionEnabled = ready && hasCapabilities(
-                state.grantedCapabilities,
-                when (pending.operation) {
-                    PendingCommandOperation.SEND_INPUT -> 68uL
-                    PendingCommandOperation.STOP -> 72uL
-                    PendingCommandOperation.DECIDE_APPROVAL -> 16uL
-                    PendingCommandOperation.CREATE_SESSION -> 68uL
-                    PendingCommandOperation.SELECT_AGENT_PRESET -> 68uL
-                    PendingCommandOperation.SELECT_MODEL -> 68uL
-                    PendingCommandOperation.FORK_SESSION -> 68uL
-                    // S-policy: 撤销与审批同信任域；预算与发送/控制同域。
-                    PendingCommandOperation.REVOKE_APPROVAL_RULE -> 16uL
-                    PendingCommandOperation.SET_SESSION_BUDGET -> 68uL
-                },
-            )
-            action = onReconcile
-        }
-        stale -> {
-            actionLabel = "重新连接"
-            actionEnabled = true
-            action = onReconnect
-        }
-        !writeAuthorized -> {
-            actionLabel = "验证锁定"
-            actionEnabled = ready
-            action = onProbe
-        }
-        !leaseUsable -> {
-            actionLabel = "取得控制"
-            actionEnabled = ready
-            action = onAcquireControl
-        }
-        // S-policy: exhausted 是 Host 自己断言的闸门状态（policy_changed /
-        // BUDGET_EXHAUSTED 拒绝），据此预先关闭发送，避免必然被拒的往返。
-        state.sessionBudget?.exhausted == true -> {
-            actionLabel = "预算已用尽"
-            actionEnabled = false
-            action = {}
-        }
-        else -> {
-            actionLabel = "发送"
-            actionEnabled = ready && state.localDraft.isNotBlank()
-            action = onSend
-        }
+    val primary = composerPrimary(state)
+    val actionLabel = primary.label
+    val actionEnabled = primary.enabled
+    val action: () -> Unit = when (primary.kind) {
+        ComposerPrimaryKind.RECONCILE -> onReconcile
+        ComposerPrimaryKind.RECONNECT -> onReconnect
+        ComposerPrimaryKind.PROBE -> onProbe
+        ComposerPrimaryKind.SEND -> onSend
+        ComposerPrimaryKind.BLOCKED -> ({})
     }
-    val settlement = when {
-        state.commandRecoveryBlocked ->
-            "受保护命令状态不可读 · 已阻止发送以避免重复效果"
-        pending?.progress == PendingCommandProgress.PREPARED ->
-            "已在发送前安全记录 · 重连/对账使用同一 command id"
-        pending?.progress == PendingCommandProgress.RECEIVED ->
-            "Host 已收到该命令 · 等待持久的 COMMITTED 或明确的 REJECTED"
-        pending?.progress == PendingCommandProgress.REQUESTED ->
-            "Stop 已到达精确 turn owner · 等待持久 user-abort 与 Agent 静默"
-        pending?.progress == PendingCommandProgress.UNKNOWN ->
-            when (pending.operation) {
-                PendingCommandOperation.STOP -> "Stop 结果未知 · 用同一 command id 对账，绝不指向更新的 turn"
-                PendingCommandOperation.DECIDE_APPROVAL -> "审批结果未知 · 用同一 command id 对账，绝不决定更新的 revision"
-                PendingCommandOperation.CREATE_SESSION -> "创建结果未知 · 用同一 command id 对账，同一 id 收敛到同一会话"
-                PendingCommandOperation.SELECT_AGENT_PRESET -> "模式选择结果未知 · 用同一 command id 对账，绝不重复切换"
-                PendingCommandOperation.SELECT_MODEL -> "模型选择结果未知 · 用同一 command id 对账，绝不重复切换"
-                PendingCommandOperation.FORK_SESSION -> "分叉结果未知 · 用同一 command id 对账，同一 id 收敛到同一子会话"
-                PendingCommandOperation.REVOKE_APPROVAL_RULE -> "撤销结果未知 · 用同一 command id 对账，重放收敛到同一规则"
-                PendingCommandOperation.SET_SESSION_BUDGET -> "预算结果未知 · 用同一 command id 对账，同一 id 收敛到同一上限"
-                else -> "结果未知 · 用同一 command id 对账，不要创建替代命令"
-            }
-        stale -> "草稿加密保存在本机 · 恢复连接后再取得控制或发送"
-        !writeAuthorized -> "只读授权 · 在 Host 上选择会话控制 profile 后才能发送"
-        !leaseUsable -> "发送前需取得会话控制 · 租约过期即失败关闭"
-        state.sessionBudget?.exhausted == true -> "会话预算已用尽 · 在会话策略中提高上限后才能继续发送"
-        else -> "控制 epoch ${state.controlLease.epoch} · 发送先于传输在本地持久化"
-    }
-    val happySend = pending == null && !stale && writeAuthorized && leaseUsable &&
-        state.sessionBudget?.exhausted != true && !state.commandRecoveryBlocked
+    val settlement = primary.settlement
+    val happySend = !primary.showSettlement
     val draftPlaceholder = when {
         voice != null && listening -> "正在聆听…"
         stale -> "离线 · 可留草稿，恢复后由你手动发送"
@@ -1758,8 +1715,7 @@ private fun V2Composer(
                 // 原型 P7 C8：运行态在 composer 右侧给红色圆形停止钮（■），
                 // 与发送并存——发送在运行中仍可排队，停止只作用于精确 turn。
                 if (stopAuthorized && state.sessionRunning == true && !stale) {
-                    val stopEnabled = ready && leaseUsable && pending == null &&
-                        state.activityRevision?.let { it > 0 } == true
+                    val stopEnabled = primary.stopEnabled
                     Box(
                         modifier = Modifier
                             .size(40.dp)

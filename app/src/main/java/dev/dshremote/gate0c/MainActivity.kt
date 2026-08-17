@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
@@ -84,8 +85,10 @@ import dev.dshremote.gate0c.ui.DshColors
 import dev.dshremote.gate0c.ui.DshRemoteTheme
 import dev.dshremote.gate0c.ui.RendererFixture
 import dev.dshremote.gate0c.ui.SessionTimeline
+import dev.dshremote.gate0c.ui.v2.FleetRegistryFailure
 import dev.dshremote.gate0c.ui.v2.V2App
 import dev.dshremote.gate0c.ui.v2.V2Callbacks
+import dev.dshremote.gate0c.ui.v2.V2FleetRepair
 import dev.dshremote.gate0c.ui.v2.V2HostFace
 import dev.dshremote.gate0c.ui.v2.V2Notification
 import dev.dshremote.gate0c.ui.v2.V2NotificationCenter
@@ -155,7 +158,7 @@ class MainActivity : ComponentActivity() {
                             onOpenSession = {},
                             onReconnect = {},
                             onProbe = {},
-                            onAcquireControl = {},
+                            onRetainControl = {},
                             onSend = {},
                             onStop = {},
                             onApprovalDecision = { _, _ -> },
@@ -365,7 +368,7 @@ class MainActivity : ComponentActivity() {
                     val supervisorViews by fleet.supervisorViews.collectAsStateWithLifecycle()
                     val discoveryState by discovery.state.collectAsStateWithLifecycle()
                     var ceremony by remember { mutableStateOf<Gate0CClient?>(null) }
-                    var fleetFailure by remember { mutableStateOf<String?>(null) }
+                    var fleetFailure by remember { mutableStateOf<FleetRegistryFailure?>(null) }
                     val ceremonyState by (ceremony?.state ?: kotlinx.coroutines.flow.flowOf(null))
                         .collectAsStateWithLifecycle(null)
 
@@ -374,9 +377,11 @@ class MainActivity : ComponentActivity() {
                             fleet.syncHosts()
                             null
                         } catch (error: PairedHostLockedException) {
-                            "配对记录被设备锁封存 · 解锁后自动恢复，无需修复"
+                            Log.w("DSHRemoteFleet", "registry_sealed type=${error.javaClass.simpleName}")
+                            FleetRegistryFailure.LOCKED
                         } catch (error: Throwable) {
-                            "配对记录无法认证 · 需要显式修复"
+                            Log.w("DSHRemoteFleet", "registry_unauthenticated type=${error.javaClass.simpleName}")
+                            FleetRegistryFailure.UNAUTHENTICATED
                         }
                     }
                     LaunchedEffect(resyncTrigger.intValue) { resync() }
@@ -414,16 +419,30 @@ class MainActivity : ComponentActivity() {
                     val showPairing = fleetFailure == null &&
                         (ceremony != null || (slices.isEmpty() && pendingInvitation.value == null))
                     when {
-                        fleetFailure != null -> Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .statusBarsPadding()
-                                .padding(horizontal = 36.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                        ) {
-                            Text(fleetFailure!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
-                            TextButton(onClick = { resyncTrigger.intValue++ }) { Text("重试") }
+                        fleetFailure != null -> V2Theme {
+                            V2FleetRepair(
+                                failure = fleetFailure!!,
+                                onRetry = { resyncTrigger.intValue++ },
+                                onReset = if (fleetFailure == FleetRegistryFailure.UNAUTHENTICATED) {
+                                    {
+                                        try {
+                                            fleet.resetLocalAuthority()
+                                            ceremony?.close()
+                                            ceremony = null
+                                            fleetFailure = null
+                                            resyncTrigger.intValue++
+                                        } catch (error: Throwable) {
+                                            Log.w(
+                                                "DSHRemoteFleet",
+                                                "registry_reset_failed type=${error.javaClass.simpleName}",
+                                            )
+                                            fleetFailure = FleetRegistryFailure.UNAUTHENTICATED
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
                         }
                         showPairing -> PairingScreen(
                             state = ceremonyState ?: Gate0CState(phase = ConnectionPhase.UNPAIRED),
@@ -471,7 +490,7 @@ class MainActivity : ComponentActivity() {
                                         onOpenSession = slice.client::selectSession,
                                         onReconnect = slice.client::connect,
                                         onProbe = slice.client::runDisabledCommandProbe,
-                                        onAcquireControl = slice.client::acquireControl,
+                                        onRetainControl = slice.client::retainControl,
                                         onSend = slice.client::sendDraft,
                                         onStop = slice.client::stopActive,
                                         onApprovalDecision = slice.client::decideApproval,
@@ -483,7 +502,13 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onDraftChanged = slice.client::updateLocalDraft,
                                         onReadingPositionChanged = slice.client::updateReadingPosition,
-                                        onCreateSession = slice.client::createSession,
+                                        onCreateSession = { choice ->
+                                            slice.client.createSession(
+                                                choice.agentPreset,
+                                                choice.workspaceId,
+                                                choice.newWorkspaceName,
+                                            )
+                                        },
                                         onSelectAgentPreset = slice.client::selectAgentPreset,
                                         onSelectModel = slice.client::selectModel,
                                         onForkSession = slice.client::forkSession,
@@ -1732,7 +1757,7 @@ private fun CompatibilityBar() {
 private fun InstructionBar(
     state: Gate0CState,
     onDraftChanged: (String) -> Unit,
-    onAcquireControl: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onAcquireControl: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onReconcile: () -> Unit,
@@ -1781,10 +1806,10 @@ private fun InstructionBar(
             actionEnabled = false
             action = {}
         }
-        !leaseUsable -> {
-            actionLabel = "Take control"
-            actionEnabled = ready
-            action = onAcquireControl
+        state.controlHeldByOther && !leaseUsable -> {
+            actionLabel = "Send"
+            actionEnabled = false
+            action = {}
         }
         else -> {
             actionLabel = "Send"
@@ -1810,8 +1835,9 @@ private fun InstructionBar(
                 "Outcome unknown · reconcile the same command id; do not create a replacement"
             }
         !writeAuthorized -> "Read-only Host grant · choose Session control on the Host to enable Send"
-        !ready -> "Draft stays encrypted locally · reconnect before taking control or sending"
-        !leaseUsable -> "Take Session control before Send · lease expiry fails closed"
+        !ready -> "Draft stays encrypted locally · reconnect before sending"
+        state.controlHeldByOther && !leaseUsable -> "The Host web page is writing this session…"
+        !leaseUsable -> "Typing prepares write access to the Host conversation"
         else -> "Active control epoch ${state.controlLease.epoch} · Send persists locally before transport"
     }
     Surface(
@@ -1833,7 +1859,8 @@ private fun InstructionBar(
         ) {
             if (stopAuthorized && state.sessionRunning == true) {
                 val stopPending = pending?.operation == PendingCommandOperation.STOP
-                val stopEnabled = ready && leaseUsable && pending == null &&
+                val stopEnabled = ready && pending == null &&
+                    !(state.controlHeldByOther && !leaseUsable) &&
                     state.activityRevision?.let { it > 0 } == true
                 Row(
                     modifier = Modifier.fillMaxWidth(),
