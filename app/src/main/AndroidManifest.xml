@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:maxSdkVersion="36"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- S-blob：相册选取在部分 OEM（实测 vivo）上即使经系统选择器授权，
+         MediaProvider 仍按其“相册”运行权限拦截读取（openInputStream 恒 null）。
+         声明现代读取权限，选取前按需请求；拒绝则入口如实报错。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@drawable/ic_launcher"
+        android:label="DSH Remote"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.DSHRemote">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="dsh-remote"
+                    android:host="pair"
+                    android:path="/v1" />
+            </intent-filter>
+        </activity>
+        <!-- S-blob: camera captures stage into the app-private cache; the
+             composer uploads them through the blob channel at send time. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="dev.dshremote.gate0c.blobcamera"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/blob_camera_paths" />
+        </provider>
+    </application>
+</manifest>

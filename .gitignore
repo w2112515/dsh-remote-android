@@ -1,0 +1,27 @@
+# Gradle / IDE
+.gradle/
+.idea/
+*.iml
+.kotlin/
+captures/
+.cxx/
+.DS_Store
+*.hprof
+
+# Local SDK path — never commit
+local.properties
+
+# Build outputs
+build/
+**/build/
+*.apk
+*.aab
+*.ap_
+
+# Signing material
+*.keystore
+*.jks
+*.p12
+
+# Logs
+*.log
